@@ -454,39 +454,26 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS — Piper (offline, default) or Fish Audio; see tts.py
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
+    """One whole utterance as audio, with whichever engine is selected."""
+    problem = tts.voice_problem()
+    if problem:
+        log.warning(f"TTS unavailable: {problem}")
         return None
-
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
+        r = await tts.synthesize(text, fish_api_key=FISH_API_KEY,
+                                 fish_voice_id=FISH_VOICE_ID)
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None
+    if r is None:
+        return None
+    _session_tokens["tts_calls"] += 1
+    _append_usage_entry(0, 0, "tts")
+    return r.audio
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +595,8 @@ async def _voice_emit(msg: dict) -> None:
 
 
 async def _synth_for_speech(text: str) -> Optional[bytes]:
-    r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
+    r = await tts.synthesize(text, fish_api_key=FISH_API_KEY, fish_voice_id=FISH_VOICE_ID,
+                             client=_tts_client)
     if r is None:
         return None
     _session_tokens["tts_calls"] += 1
@@ -628,7 +616,9 @@ def _fmt_reset(ts) -> str:
         when = datetime.fromtimestamp(float(ts))
     except (TypeError, ValueError, OSError, OverflowError):
         return "later"
-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+    # No "%-I" / "%-d": the Windows C runtime rejects the "-" flag outright.
+    clock = f"{when.hour % 12 or 12}:{when.minute:02d} {when.strftime('%p')}"
+    clock = clock.replace(":00 ", " ")                       # "10:00 AM" -> "10 AM"
     days = (when.date() - datetime.now().date()).days
     if days <= 0:
         return clock
@@ -636,7 +626,7 @@ def _fmt_reset(ts) -> str:
         return f"tomorrow at {clock}"
     if days < 7:
         return f"{when.strftime('%A')} at {clock}"
-    return f"{when.strftime('%A %-d %B')} at {clock}"
+    return f"{when.strftime('%A')} {when.day} {when.strftime('%B')} at {clock}"
 
 
 # True but useless: "down" names neither cause nor remedy. When the brain's
@@ -6875,6 +6865,11 @@ async def api_settings_status():
         "claude_code_installed": claude_installed,
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
+        # Whether the selected voice can speak — what first-run setup keys on,
+        # so a Piper install is not sent to a Fish key form it does not need.
+        "tts_engine": tts.engine(),
+        "voice_ready": tts.voice_problem() is None,
+        "voice_problem": tts.voice_problem(),
         "env_keys_set": {
             "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),

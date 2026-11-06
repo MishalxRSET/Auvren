@@ -252,3 +252,15 @@ async def test_editor_refuses_a_switch_shaped_path(monkeypatch):
     monkeypatch.setattr(actions, "_vscode_exe", lambda: r"C:\Code.exe")
     out = await actions.open_in_editor("--install-extension=evil")
     assert out["success"] is False
+
+
+def test_no_strftime_uses_the_dash_flag():
+    """`%-I` / `%-d` are glibc-only: the Windows C runtime raises ValueError."""
+    import re
+    root = Path(__file__).parent.parent
+    offenders = []
+    for py in root.glob("*.py"):
+        for n, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            if "strftime" in line and re.search(r"%-[A-Za-z]", line):
+                offenders.append(f"{py.name}:{n}")
+    assert offenders == []

@@ -46,7 +46,7 @@ async def test_a_failing_check_is_spoken(monkeypatch):
 @pytest.mark.asyncio
 async def test_all_ok_says_nothing(monkeypatch):
     monkeypatch.setattr(preflight, "run_checks",
-                        lambda **k: _async([_check("fish_api_key", preflight.STATUS_OK)]))
+                        lambda **k: _async([_check("voice", preflight.STATUS_OK)]))
     sp = _Speech()
     monkeypatch.setattr(server, "speech", sp)
 

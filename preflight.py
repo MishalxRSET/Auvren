@@ -39,6 +39,7 @@ from typing import Optional
 
 import claude_env
 import screen
+import tts
 import winplat
 
 log = logging.getLogger("jarvis.preflight")
@@ -465,16 +466,26 @@ def _check_screen_recording_sync() -> Check:
     )
 
 
-def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
-        return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
-    return Check(
-        name="fish_api_key",
-        status=STATUS_FAIL,
-        message="FISH_API_KEY is not set.",
-        remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
-    )
+def _check_voice_sync() -> Check:
+    """The selected TTS engine can speak, or Auvren has no voice.
+
+    Piper (the default) needs piper.exe and one voice; Fish needs its key.
+    See tts.py for how the engine is chosen.
+    """
+    engine = tts.engine()
+    problem = tts.voice_problem()
+    if problem is None:
+        if engine == tts.ENGINE_PIPER:
+            return Check(name="voice", status=STATUS_OK,
+                         message=f"Piper voice {Path(tts.piper_model()).stem} is ready.")
+        return Check(name="voice", status=STATUS_OK, message="Fish Audio key is set.")
+    if engine == tts.ENGINE_FISH:
+        remedy = ("Get a Fish Audio API key from fish.audio and set FISH_API_KEY "
+                  "in .env, or remove TTS_ENGINE=fish to use Piper (free, offline).")
+    else:
+        remedy = ("Run scripts\\get_piper.ps1 to install Piper and a voice, or set "
+                  "PIPER_PATH and PIPER_MODEL in .env.")
+    return Check(name="voice", status=STATUS_FAIL, message=problem, remedy=remedy)
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
@@ -658,11 +669,11 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 # a warning nobody can act on.
 if winplat.IS_WINDOWS:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
-    _SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync)
 else:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-    _SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -728,8 +739,10 @@ def _phrase_for(check: Check) -> str:
         if "not been granted" in msg:
             return "I don't have Screen Recording permission"
         return "Screen Recording couldn't be checked"
-    if name == "fish_api_key":
-        return "I have no Fish Audio key"
+    if name == "voice":
+        if "FISH_API_KEY" in msg:
+            return "I have no Fish Audio key"
+        return "my voice isn't installed"
     if name == "anthropic_key_leftover":
         return "there's a leftover Anthropic API key in the environment"
     if name == "cross_session_inbound":

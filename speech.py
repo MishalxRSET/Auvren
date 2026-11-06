@@ -153,11 +153,11 @@ MAX_RESUMES = 3                  # an utterance interrupted more often than this
 # hold, `high_sent` was walkable: each ack unlocks a send, the send raises
 # the bound, the next ack is "for a chunk that went out" — three messages
 # marked six chunks played while none had, and `wait_for` opened a steer's
-# cancel window over audio nobody had heard. The length comes from the mp3
-# itself (`mp3_seconds`), scaled DOWN so it is a floor and never an estimate,
-# and capped well under `ack_timeout` so a held ack can never look like a
-# client that went away. A blob that is not mp3 (every test fake) has no
-# floor at all — which is the old behaviour, exactly.
+# cancel window over audio nobody had heard. The length comes from the audio
+# itself (`audio_seconds`: Piper's WAV or Fish's MP3), scaled DOWN so it is a
+# floor and never an estimate, and capped well under `ack_timeout` so a held
+# ack can never look like a client that went away. A blob that is neither
+# (every test fake) has no floor at all — which is the old behaviour, exactly.
 ACK_FLOOR_FACTOR = 0.9
 ACK_FLOOR_MAX_SEC = 30.0
 RESUME_ACK_GRACE_SEC = 1.0       # after a kept chunk's floor, how long a resume waits for its ack
@@ -191,8 +191,38 @@ def mp3_seconds(data: Optional[bytes]) -> float:
     return 0.0
 
 
+def wav_seconds(data: Optional[bytes]) -> float:
+    """How long this PCM WAV plays, from its `fmt ` and `data` chunks (what
+    Piper writes). 0.0 for anything that is not one — no header, no floor.
+
+    A `data` size larger than the bytes actually present (a streamed WAV
+    whose header was written first) is clamped to what is there, so this is
+    a floor and never an over-estimate.
+    """
+    if not data or len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return 0.0
+    i, byte_rate = 12, 0
+    while i + 8 <= len(data):
+        cid = data[i:i + 4]
+        size = int.from_bytes(data[i + 4:i + 8], "little")
+        body = i + 8
+        if cid == b"fmt " and size >= 16 and body + 16 <= len(data):
+            byte_rate = int.from_bytes(data[body + 8:body + 12], "little")
+        elif cid == b"data":
+            if byte_rate <= 0:
+                return 0.0
+            return min(size, len(data) - body) / byte_rate
+        i = body + size + (size & 1)        # chunks are word-aligned
+    return 0.0
+
+
+def audio_seconds(data: Optional[bytes]) -> float:
+    """Playing time of one chunk, whichever engine made it (WAV or MP3)."""
+    return wav_seconds(data) or mp3_seconds(data)
+
+
 def ack_floor_seconds(audio: Optional[bytes]) -> float:
-    return min(mp3_seconds(audio) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
+    return min(audio_seconds(audio) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
 
 # A one- or two-word utterance whose every token JARVIS just said is only an
 # echo if it arrived while that speech was still coming out of the speaker.
@@ -1076,7 +1106,7 @@ class SpeechScheduler:
                     # so inserting it now would let that ack land on the
                     # bridge. Wait for the ack — at most the audio's own
                     # length plus a grace — before resuming. Only audio with
-                    # a readable length (mp3, which is all tts.py asks for)
+                    # a readable length (WAV or MP3, which is all tts.py makes)
                     # can be waited for; a blob with no floor resumes at once,
                     # as before.
                     self._kick_later(kept.earliest_ack + RESUME_ACK_GRACE_SEC - now)

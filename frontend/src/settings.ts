@@ -13,6 +13,11 @@ interface StatusResponse {
   claude_code_installed: boolean;
   server_port: number;
   uptime_seconds: number;
+  /** "piper" (offline, the default) or "fish". */
+  tts_engine?: string;
+  /** Whether the selected voice can speak. Absent from an older server. */
+  voice_ready?: boolean;
+  voice_problem?: string | null;
   env_keys_set: {
     fish_audio: boolean;
     fish_voice_id: boolean;
@@ -33,6 +38,15 @@ let panelEl: HTMLElement | null = null;
 let isOpen = false;
 let isFirstTimeSetup = false;
 let setupStep = 0; // 0=fish, 1=name, 2=done
+
+/** First-run setup is about having a voice, not about having a Fish key:
+ *  Piper needs none. Falls back to the Fish key for an older server. */
+function needsVoiceSetup(status: StatusResponse): boolean {
+  if (typeof status.voice_ready === "boolean") {
+    return !status.voice_ready && status.tts_engine === "fish";
+  }
+  return !status.env_keys_set.fish_audio;
+}
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -76,7 +90,7 @@ function buildPanelHTML(): string {
           <h3>API Keys</h3>
 
           <div class="settings-field">
-            <label>Fish Audio API Key</label>
+            <label>Fish Audio API Key (optional — Piper is the free offline voice)</label>
             <div class="settings-input-row">
               <input type="password" id="input-fish-key" placeholder="Fish Audio key..." />
               <button class="settings-btn" id="btn-test-fish">Test</button>
@@ -189,7 +203,9 @@ async function loadStatus() {
     if (serverDetail) serverDetail.textContent = `port ${status.server_port} | up ${formatUptime(status.uptime_seconds)}`;
 
     // API key status dots
-    setDotStatus("status-fish", status.env_keys_set.fish_audio ? "green" : "red");
+    // No key is only a problem when Fish is the voice in use.
+    setDotStatus("status-fish", status.env_keys_set.fish_audio ? "green"
+      : status.tts_engine === "fish" ? "red" : "off");
 
     // System info
     const portEl = document.getElementById("sysinfo-port");
@@ -364,7 +380,7 @@ export async function openSettings() {
   await loadPreferences();
 
   // Check for first-time setup
-  if (status && !status.env_keys_set.fish_audio) {
+  if (status && needsVoiceSetup(status)) {
     enterSetupMode();
   }
 }
@@ -388,7 +404,7 @@ export function isSettingsOpen(): boolean {
 export async function checkFirstTimeSetup(): Promise<boolean> {
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
-    if (!status.env_keys_set.fish_audio) {
+    if (needsVoiceSetup(status)) {
       openSettings();
       return true;
     }

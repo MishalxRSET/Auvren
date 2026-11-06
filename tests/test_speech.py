@@ -1613,3 +1613,26 @@ async def test_the_quiet_room_bar_returns_once_his_audio_has_ended(h):
     await h.ack_all()
     await asyncio.sleep(0.05)
     assert not s.is_speaking
+
+
+def test_wav_seconds_reads_the_header_and_nothing_else():
+    """Piper's WAV gets the same ack floor Fish's MP3 always had."""
+    import speech
+    import io
+    import wave
+
+    def wav(seconds, rate=22050):
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * int(rate * seconds))
+        return buf.getvalue()
+
+    assert abs(speech.wav_seconds(wav(2.0)) - 2.0) < 0.01
+    assert abs(speech.wav_seconds(wav(1.0, rate=16000)) - 1.0) < 0.01
+    assert speech.wav_seconds(b"A:Alpha one.") == 0.0, "a fake has no floor"
+    assert speech.wav_seconds(None) == 0.0 and speech.wav_seconds(b"") == 0.0
+    truncated = wav(2.0)[:44 + 22050]          # header claims 2 s, half a second present
+    assert abs(speech.wav_seconds(truncated) - 0.5) < 0.01, "a floor, never an over-estimate"
+    assert abs(speech.audio_seconds(wav(1.5)) - 1.5) < 0.01
+    assert speech.ack_floor_seconds(wav(100.0)) == speech.ACK_FLOOR_MAX_SEC
