@@ -1,31 +1,61 @@
-# JARVIS — Voice AI Assistant
+# Auvren — Voice AI Assistant for Windows
 
 ## Overview
-JARVIS (Just A Rather Very Intelligent System) is a voice-first AI assistant for macOS. It runs locally on your machine, driving Claude Code for development tasks — every execution recorded as a *run* and watchable at `/dashboard`.
+Auvren is a voice-first AI assistant for **Windows**, in the style of JARVIS.
+It began as `ethanplusai/jarvis` (macOS) and is being rebuilt for Windows and
+merged with an offline design (local Ollama brain, Piper voice, wake word —
+the owner's "Auvren Build Plan"). Today it runs locally, speaks with Piper,
+and drives Claude Code for development tasks — every execution recorded as a
+*run* and watchable at `/dashboard`.
+
+Internal identifiers still say jarvis — module names (`jarvis_mcp.py`,
+`jarvis_memory.py`), `JARVIS_*` environment variables, the data layout — so
+an existing `.env` and data folder keep working. User-facing text says Auvren.
+
+**Windows port status.** Phase 1 (done): startup, the run pipeline, session
+watching, voice, the dashboard, opening Windows Terminal / Chrome / VS Code,
+toast notifications. Phase 2 (not yet): `screen.py` (screenshots, window
+list), `dialog.py` (answering a prompt by keystroke) and `session_steer.py`
+(messaging another session) refuse on Windows with a spoken sentence. Their
+macOS internals are still in those files, unreachable on Windows, until
+phase 2 replaces them. Nothing here has been run on real Windows by the
+author of the port; the suite runs on Linux with Win32 faked at the seams.
 
 ## Quick Start
 Read `skills/jarvis-setup/SKILL.md` first — it carries setup and debugging
 facts (mic-in-Chrome-only, the per-port permission trap, subscription vs. API
-key, what an expired login sounds like, Accessibility) that were only learned
-by hitting them live, and this walkthrough assumes them.
+key, what an expired login sounds like) that were only learned by hitting
+them live, and this walkthrough assumes them. It was written on macOS: its
+Accessibility and Terminal.app sections do not apply on Windows.
 
 When a user clones this repo and starts Claude Code, help them:
 1. Copy .env.example to .env
 2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-   newer) and log in with `claude` — JARVIS's brain runs on your Claude
+   newer) and log in with `claude` — Auvren's brain runs on your Claude
    subscription, not on an API key
-3. Get a Fish Audio API key from fish.audio (required — there is no fallback
-   voice)
+3. Install the voice (Piper, offline, free):
+   `powershell -ExecutionPolicy Bypass -File scripts\get_piper.ps1`
+   — it downloads piper.exe and the en_GB-alan-medium voice into
+   `data\piper\` and speaks a test sentence. Fish Audio is optional
+   (`TTS_ENGINE=fish` + `FISH_API_KEY`).
+   On Windows npm's `claude.cmd` is refused as a launcher (see `winplat.py`);
+   use the native installer (`irm https://claude.ai/install.ps1 | iex`) or set
+   `JARVIS_CLAUDE_PATH` to `claude.exe`.
 4. Install Python dependencies: pip install -r requirements.txt
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
-7. Generate the SSL certs — see below, they are NOT optional:
+7. Generate the SSL certs — see below, they are NOT optional (Git for
+   Windows ships `openssl`, in Git Bash):
    `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'`
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
-11. Click to enable audio, speak to JARVIS
+11. Click to enable audio, speak to Auvren
+
+Do not pass `--reload` on Windows: uvicorn's reloader installs an event loop
+that cannot start subprocesses, so the brain and every run would fail.
+`server.py` ignores the flag there and says so.
 
 **The certs are required for the dev-server workflow**, despite `server.py`
 treating them as optional. `server.py` serves HTTPS only when `cert.pem` and
@@ -42,8 +72,10 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Communication**: WebSocket (JSON messages + binary audio)
 - **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
   the user's subscription; no Anthropic API calls on the voice path
-- **TTS**: Fish Audio with JARVIS voice model
-- **System**: AppleScript for Terminal and Chrome integration
+- **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
+  on stdin, WAV out); Fish Audio optional (`tts.py`)
+- **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
+  never through `cmd.exe` (`actions.py`); every Win32 seam in `winplat.py`
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
   `run_store.py` (SQLite) + `run_executor.py`, surfaced at `/api/runs`,
   `/ws/runs`, and the `/dashboard` UI
@@ -88,7 +120,13 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
-- `tts.py` — Fish Audio synthesis, one request per sentence chunk
+- `tts.py` — Speech synthesis: Piper (default) or Fish Audio, one call per
+  sentence chunk; `engine()` says which
+- `winplat.py` — Every Win32 seam: `pid_alive` (never `os.kill(pid, 0)`,
+  which TERMINATES on Windows), `kill_tree` (`taskkill /T /F`),
+  `claude_argv` (resolves npm's `claude.cmd` to the real program, or
+  refuses — cmd.exe would re-parse the brain's system prompt), reparse
+  points, System32 paths
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
@@ -106,9 +144,11 @@ arbitrary LLM and file content, so everything goes through
 - `session_watch.py` — Watches every Claude Code session on the machine
   (process / conversation / project)
 - `session_steer.py` — Sends a message into a running session's inbox socket
-- `dialog.py` — Answers a permission prompt in a Terminal window by sending
-  it a keystroke (needs Accessibility)
-- `notifier.py` — macOS notification fallback when no browser tab is
+  (Unix socket; returns `failed` on Windows until phase 2)
+- `dialog.py` — Answers a permission prompt by sending one keystroke
+  (macOS Terminal.app only; returns `not_found` on Windows until phase 2)
+- `notifier.py` — Windows toast fallback (fixed PowerShell script, untrusted
+  text only in environment variables) when no browser tab is
   connected to speak through
 - `jarvis_memory.py` — Long-term memory: a folder of plain Markdown files the
   user can read and edit directly, not a database
@@ -118,12 +158,15 @@ arbitrary LLM and file content, so everything goes through
   Accessibility, Fish key, cross-session steering
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
-- `actions.py` — System actions (Terminal, Chrome) via AppleScript
+- `actions.py` — System actions: Windows Terminal (PowerShell fallback),
+  Chrome/Firefox by their own exe, VS Code as `Code.exe` (Notepad/Explorer
+  fallback). Every program exec'd directly with argv, never via `cmd.exe`
 - `browser.py` — Playwright. Only the headless half is live (`read_page`,
   `capture_page`, behind `read_page` / `look_at_page`); the headful
   `JarvisBrowser` search/research class is reachable from nothing but
   `tests/test_browser_integration.py`
-- `screen.py` — Seeing the Mac itself: the window list (`osascript`) and one
+- `screen.py` — Seeing the screen (refuses on Windows until phase 2; the
+  macOS path below is still in the file): the window list (`osascript`) and one
   downscaled `screencapture` the brain sees as an MCP image block. Captured
   only on a turn the user drove, never persisted, never on a timer
 - `repo_read.py` — Cheap, model-free reading of a repository (no `claude`
@@ -160,8 +203,17 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
   rejection is not enough with a given microphone
-- `FISH_API_KEY` (required) — Fish Audio TTS
-- `FISH_VOICE_ID` (optional) — Voice model ID
+- `TTS_ENGINE` (optional) — `piper` or `fish`. Unset: Piper if installed,
+  else Fish if `FISH_API_KEY` is set, else Piper (and preflight says what is
+  missing)
+- `PIPER_PATH` / `PIPER_MODEL` (optional) — piper.exe and the voice's
+  `.onnx` (its `.onnx.json` must sit beside it). Unset, they are found in
+  `<data>\piper\` where `scripts\get_piper.ps1` puts them. Deliberately
+  NOT writable through the settings API: `PIPER_PATH` names a program
+- `PIPER_LENGTH_SCALE`, `PIPER_SPEAKER`, `PIPER_MAX_PARALLEL` (optional) —
+  speaking rate, speaker of a multi-speaker voice, models loaded at once (2)
+- `FISH_API_KEY` (optional) — Fish Audio TTS, only with `TTS_ENGINE=fish`
+- `FISH_VOICE_ID` (optional) — Fish voice model ID
 - `USER_NAME` (optional) — Your name for JARVIS to use
 - `JARVIS_DATA_DIR` (optional) — Where JARVIS writes everything: the SQLite
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`
@@ -199,8 +251,10 @@ the file) because it drives `browser.py`, which launches Chromium with
 `headless=False` on purpose and runs live searches. Run those with
 `pytest -m browser`; they skip themselves if there is no network.
 
-Everything else uses fakes at the subprocess seam — `screencapture`, `sips`,
-`osascript` and `claude` are never really invoked. If you add a test that
+Everything else uses fakes at the subprocess seam — `piper`, `powershell`,
+`taskkill`, `wt`, `claude` (and the macOS `screencapture`/`sips`/`osascript`
+still in phase-2 files) are never really invoked; Win32 calls are faked in
+`winplat`. The suite runs on Linux or Windows. If you add a test that
 needs the network, a real window, or a real `claude`, mark it.
 
 ## Conventions
@@ -210,7 +264,8 @@ needs the network, a real window, or a real `claude`, mark it.
   `/internal/tool`), not by parsing `[ACTION:X]` tags out of its reply — that
   tag machinery is gone in full, including the last handler (`_execute_browse`),
   which lost its caller with the voice dispatch chain
-- AppleScript for Terminal and Chrome control (no OAuth needed)
+- Programs are exec'd directly with argv — never `shell=True`, `start`,
+  `os.startfile` on a file that could be a script, or a `.cmd`/`.bat` shim
 - SQLite for runs, run events and usage (`run_store.py`, `usage_store.py`);
   long-term memory is plain Markdown files instead (`jarvis_memory.py`) —
   the user edits it directly, so it is never a database

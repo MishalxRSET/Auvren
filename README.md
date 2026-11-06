@@ -1,8 +1,17 @@
-# JARVIS
+# Auvren
 
-**Just A Rather Very Intelligent System — a voice for Claude Code.**
+**A JARVIS-style voice assistant for Windows — and a voice for Claude Code.**
 
-JARVIS is a British butler who sits on top of the Claude Code you already pay
+> Auvren began as [`ethanplusai/jarvis`](https://github.com/ethanplusai/jarvis),
+> a macOS project, and is being rebuilt for **Windows**. What works today:
+> voice (Piper, offline), the run pipeline, session watching, the dashboard,
+> opening Windows Terminal / Chrome / VS Code, and toast notifications. Not
+> yet on Windows: looking at the screen, answering a session's permission
+> prompt by keystroke, and messaging another session — those say so out loud.
+> Much of the prose below still describes the macOS original and says
+> "JARVIS"; the setup section is current.
+
+Auvren is a British butler who sits on top of the Claude Code you already pay
 for. You talk to him. He brainstorms a project with you out loud, one question
 at a time; when you have settled on something he writes the design down as a
 file in your project; then he starts a real Claude Code session on it and
@@ -76,11 +85,12 @@ limit.](docs/images/dashboard-usage.png)
 *So the number that matters is not a dollar figure — it is how much of your
 subscription's two windows is gone. Fictional sample data.*
 
-**The one thing you pay for is [Fish Audio](https://fish.audio/)**, which
-gives JARVIS his voice. Be aware there is no fallback: `tts.py` returns
-nothing without `FISH_API_KEY`, so JARVIS goes silent and his replies appear
-as text in the browser instead. If you would rather use a different TTS, that
-is a small, well-isolated file to replace — see *Make it yours* below.
+**The voice is free.** Auvren speaks with [Piper](https://github.com/rhasspy/piper),
+which runs offline on your CPU — no key, no account, no per-word bill.
+[Fish Audio](https://fish.audio/) is still supported if you prefer its hosted
+voices (`TTS_ENGINE=fish` plus `FISH_API_KEY`); that one is paid. If no voice
+is set up, Auvren's replies appear as text in the browser instead, and the
+startup check says what is missing.
 
 ## What he does
 
@@ -97,13 +107,13 @@ is a small, well-isolated file to replace — see *Make it yours* below.
   plan's checkboxes as it goes. "How far has it got" is answered by reading
   those checkboxes, not by guessing.
 - **Watches every Claude Code session on the machine** — not just his own. Ask
-  "which of my sessions are waiting on me?" and he checks live. He can post a
-  message into one, and answer a permission prompt for one running in
-  Terminal.app by pressing a single key.
+  "which of my sessions are waiting on me?" and he checks live. (On macOS he
+  could also post a message into one and press a key in its Terminal.app
+  window; on Windows those two are not ported yet.)
 - **Interrupts you when it matters.** A session that needs a human gets said
   out loud immediately; a session that merely finished gets batched into one
   sentence at the next pause. If nobody has the browser tab open, it becomes a
-  macOS notification instead.
+  Windows toast notification instead.
 - **Remembers.** Long-term memory is a folder of plain Markdown files, one
   fact per file, with an index the brain always sees. You can read and edit it
   in any text editor.
@@ -138,43 +148,57 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
 
 ## Requirements
 
-- **macOS.** Terminal control, window listing, screenshots and notifications
-  all go through AppleScript. There is no Linux or Windows path today.
+- **Windows 10 or 11.** The terminal, browser and notification actions are
+  Windows-specific (`actions.py`, `notifier.py`, `winplat.py`).
 - **Google Chrome.** Not a preference — a constraint. The microphone uses the
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
-  server-side transcription to fall back on.
-- **Claude Code, installed and logged in.** `npm install -g
-  @anthropic-ai/claude-code` (2.1.224 or newer), then run `claude` once and
-  log in. This is what JARVIS runs on.
+  server-side transcription to fall back on yet.
+- **Claude Code, installed and logged in** — the native build, 2.1.224 or
+  newer: `irm https://claude.ai/install.ps1 | iex` in PowerShell, then run
+  `claude` once and log in. npm's `claude.cmd` shim is refused as a launcher,
+  because `cmd.exe` would re-parse the brain's prompt; if that is what you
+  have, point `JARVIS_CLAUDE_PATH` at a `claude.exe`.
 - **Python 3.11+** and **Node.js 18+**.
-- **A Fish Audio API key.** Required; there is no fallback voice.
+- **Piper** for the voice — one script installs it (below).
+- **Windows Terminal** is used when present; otherwise a PowerShell window.
 
 ## Setup
 
-```bash
-git clone <your fork of this repo> jarvis
-cd jarvis
+In PowerShell:
 
-cp .env.example .env
+```powershell
+git clone <your fork of this repo> auvren
+cd auvren
+
+copy .env.example .env
 
 pip install -r requirements.txt
 python -m playwright install chromium    # for read_page / look_at_page
 
-cd frontend && npm install && cd ..
+cd frontend; npm install; cd ..
+
+powershell -ExecutionPolicy Bypass -File scripts\get_piper.ps1
 ```
 
-**Fill in the `.env`.** `.env.example` documents the lot; the short version is
-one required key and three optional ones:
+`get_piper.ps1` downloads `piper.exe` and one voice (`en_GB-alan-medium`, a
+British male voice; pass `-Voice en_US-ryan-high` or any name from the
+[Piper voice list](https://huggingface.co/rhasspy/piper-voices) for another)
+into `data\piper\`, then speaks a test sentence. Auvren finds them there on
+its own.
+
+**The `.env`.** `.env.example` documents the lot; with Piper nothing is
+required. The usual optional ones:
 
 ```env
-FISH_API_KEY=...            # required, no fallback
-# JARVIS_BRAIN_MODEL=sonnet # optional: the brain's model
-# FISH_VOICE_ID=...         # optional: a different voice
-# USER_NAME=Tony            # optional: what he calls you
+# USER_NAME=Tony            # what he calls you
+# JARVIS_BRAIN_MODEL=sonnet # the brain's model
+# TTS_ENGINE=fish           # use Fish Audio instead of Piper...
+# FISH_API_KEY=...          # ...with your key
 ```
 
-**Generate the certificates.** These are not optional:
+**Generate the certificates.** These are not optional. Git for Windows ships
+`openssl`; run this in Git Bash:
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
@@ -189,10 +213,13 @@ way to spend an evening. Generate them once and forget about them.
 
 Then, in two terminals:
 
-```bash
+```powershell
 python server.py --host 127.0.0.1        # terminal 1
-cd frontend && npm run dev               # terminal 2
+cd frontend; npm run dev                 # terminal 2
 ```
+
+Leave off `--reload` on Windows — uvicorn's reloader uses an event loop that
+cannot start subprocesses, so `server.py` ignores it there.
 
 Open **Chrome** at `http://localhost:5173`, click the page once to allow
 audio, and speak. The dashboard is at `http://localhost:5173/dashboard.html`.
@@ -277,7 +304,7 @@ Microphone → Chrome Web Speech API → WebSocket → FastAPI (server.py)
                                                       │
                     ┌─────────────────────────────────┼──────────────────────────────┐
                     ▼                                 ▼                              ▼
-        speech.py → Fish Audio → speaker    MCP tools (jarvis_mcp.py       session_watch.py
+        speech.py → Piper ─────→ speaker    MCP tools (jarvis_mcp.py       session_watch.py
                                              → POST /internal/tool)     (every Claude Code
                                                       │                  session on the machine)
                                                       ▼
@@ -317,8 +344,8 @@ invariants hold throughout it:
 | Frontend | Vite + TypeScript + Three.js (voice UI), vanilla TS (dashboard) |
 | Communication | WebSocket — JSON messages, base64 MP3 audio |
 | Brain | One long-lived `claude -p` process, Sonnet by default, on your subscription |
-| Voice | Fish Audio, one request per sentence |
-| System | AppleScript — Terminal, Chrome, notifications, screenshots |
+| Voice | Piper (offline, default) or Fish Audio, one call per sentence |
+| System | Windows Terminal, Chrome, VS Code, toast notifications — exec'd directly, never via `cmd.exe` |
 | Storage | SQLite for runs and usage; plain Markdown for memory |
 
 ### Key files
@@ -330,7 +357,8 @@ invariants hold throughout it:
 | `claude_env.py` | The environment every spawned child gets, including the `ANTHROPIC_*` scrub |
 | `jarvis_mcp.py` | Stdio MCP server exposing JARVIS's tools to the brain |
 | `speech.py` | Sentence splitting, echo rejection, barge-in, and the queue of everything JARVIS says |
-| `tts.py` | Fish Audio synthesis — the whole voice, in one small file |
+| `tts.py` | Piper or Fish Audio synthesis — the whole voice, in one file |
+| `winplat.py` | Every Win32 seam: process liveness, tree kill, the `claude` launcher |
 | `builds.py` | Spec, brief and plan: the pipeline behind a real multi-hour build |
 | `specs.py` | The review surface — reading a design back by numbered section, and approving it |
 | `run_store.py` | SQLite `runs` / `run_events`, and the six-value status enum |
