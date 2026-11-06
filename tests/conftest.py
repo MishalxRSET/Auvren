@@ -18,6 +18,24 @@ def _never_spawn_a_real_brain(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_wake_word_unless_asked(monkeypatch):
+    """The wake word is on by default for users, and while asleep Auvren
+    ignores what he hears. The voice tests were written for an assistant
+    that is always listening, so they get one; tests of the wake word set
+    WAKE_WORD themselves. It also keeps the suite off the real microphone.
+
+    `server.wake_gate` is built at import, and several fixtures reload the
+    server, so the module object's gate is switched off too, not only the
+    variable that a reload reads.
+    """
+    monkeypatch.setenv("WAKE_WORD", "off")
+    import sys
+    server = sys.modules.get("server")
+    if server is not None and hasattr(server, "wake_gate"):
+        monkeypatch.setattr(server.wake_gate, "enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _never_post_a_real_notification(monkeypatch, request):
     """No test may spam the developer's Notification Centre.
 

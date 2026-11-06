@@ -401,6 +401,10 @@ EXEMPT = {
         "read back, it goes to the server's gate and is refused — and every "
         "value goes through `_spoken` (one line, bounded) first. Driven in "
         "tests/test_local_brain.py"),
+    "wakeword.spoken_phrase": (
+        "the `.title` it reads is `str.title()` on the user's own WAKE_WORD "
+        "setting (a model name or the file name of his .onnx) — his "
+        "configuration, not a session's field, shown as the UI's hint"),
     "local_brain.result": (
         "`_LocalTurn.result` copies the turn's own spoken text into a "
         "TurnResult, the same as `brain._Turn.result`"),

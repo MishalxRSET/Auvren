@@ -549,7 +549,8 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     names = {c.name for c in results}
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "voice", "local_brain", "anthropic_key_leftover", "cross_session_inbound",
+        "voice", "local_brain", "wake_word", "anthropic_key_leftover",
+        "cross_session_inbound",
     }
 
 
@@ -682,3 +683,28 @@ def test_local_brain_check_is_quiet_with_the_claude_brain(monkeypatch):
     monkeypatch.setenv("JARVIS_BRAIN", "claude")
     monkeypatch.setattr(httpx, "get", never)
     assert preflight._check_local_brain_sync().status == STATUS_OK
+
+
+# --- the wake word ----------------------------------------------------------------
+
+def test_wake_word_off_is_fine(monkeypatch):
+    monkeypatch.setenv("WAKE_WORD", "off")
+    assert preflight._check_wake_word_sync().status == STATUS_OK
+
+
+def test_wake_word_without_the_engine_warns_but_does_not_fail(monkeypatch):
+    import wakeword
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.setattr(wakeword, "engine_problem",
+                        lambda: "The wake-word engine is not installed (openwakeword)")
+    check = preflight._check_wake_word_sync()
+    assert check.status == preflight.STATUS_WARN
+    assert "requirements-wakeword.txt" in check.remedy
+
+
+def test_wake_word_ready(monkeypatch):
+    import wakeword
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.setattr(wakeword, "engine_problem", lambda: None)
+    check = preflight._check_wake_word_sync()
+    assert check.status == STATUS_OK and "Hey Jarvis" in check.message

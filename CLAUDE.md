@@ -44,7 +44,9 @@ When a user clones this repo and starts Claude Code, help them:
    On Windows npm's `claude.cmd` is refused as a launcher (see `winplat.py`);
    use the native installer (`irm https://claude.ai/install.ps1 | iex`) or set
    `JARVIS_CLAUDE_PATH` to `claude.exe`.
-4. Install Python dependencies: pip install -r requirements.txt
+4. Install Python dependencies: pip install -r requirements.txt — and, for
+   the wake word's local engine, `pip install -r requirements-wakeword.txt`
+   then `python wakeword.py --setup` (downloads the model, lists mics)
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
@@ -54,7 +56,7 @@ When a user clones this repo and starts Claude Code, help them:
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
-11. Click to enable audio, speak to Auvren
+11. Click to enable audio, then say "Hey Jarvis" and speak to Auvren
 
 Do not pass `--reload` on Windows: uvicorn's reloader installs an event loop
 that cannot start subprocesses, so the brain and every run would fail.
@@ -86,6 +88,17 @@ this presents as "the UI is up but nothing works" rather than as an error.
   - `claude` — `brain.py`: a long-lived Claude Code process (Sonnet by
     default) on the user's subscription; no Anthropic API calls on the voice
     path
+- **Wake word** (`wakeword.py`, on by default): Auvren is asleep until
+  addressed. `WakeGate` is consulted where transcripts arrive in
+  `/ws/voice` — asleep, a final is ignored and an interim never barges in.
+  Awake = the wake word's window, OR held while he thinks/speaks (driven by
+  the status frames `_voice_emit` sends), OR the follow-up window after he
+  finishes, so a confirmation "yes" needs no second wake word. The engine
+  (`WakeListener`: openWakeWord "hey_jarvis" on the mic, 16 kHz / 80 ms
+  frames, a background thread) is OPTIONAL — `requirements-wakeword.txt`,
+  kept out of requirements.txt because it pulls onnxruntime/scipy/sklearn
+  (and tflite on Linux). Without it, a transcript that opens with the wake
+  phrase still wakes him. The browser gets `wake` frames for the orb
 - **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
   on stdin, WAV out); Fish Audio optional (`tts.py`)
 - **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
@@ -139,6 +152,9 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
+- `wakeword.py` — The wake word: `WakeGate` (pure window/hold/follow-up
+  state), `strip_wake_phrase`, `WakeListener` (openWakeWord on the mic,
+  optional deps), `python wakeword.py --setup`
 - `tts.py` — Speech synthesis: Piper (default) or Fish Audio, one call per
   sentence chunk; `engine()` says which
 - `winplat.py` — Every Win32 seam: `pid_alive` (never `os.kill(pid, 0)`,
@@ -224,6 +240,11 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   `127.0.0.1:11434`; a bind-all `0.0.0.0` is dialled as loopback),
   `OLLAMA_NUM_CTX` (8192), `OLLAMA_KEEP_ALIVE` (`30m`) — the local brain
 - `HONORIFIC` (optional, default `sir`) — how Auvren addresses the user
+- `WAKE_WORD` (default `hey_jarvis`; `off` disables; or a path to a custom
+  `.onnx`), `WAKE_THRESHOLD` (0.5), `WAKE_WINDOW_SEC` (8),
+  `WAKE_FOLLOW_UP_SEC` (8), `WAKE_DEVICE` (mic index or name). The suite
+  pins `WAKE_WORD=off` in `tests/conftest.py` (the voice tests predate it,
+  and no test may open the real microphone)
 - `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the Claude
   brain, always passed explicitly as `--model`
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but

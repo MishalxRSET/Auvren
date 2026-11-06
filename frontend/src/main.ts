@@ -19,6 +19,18 @@ type State = "idle" | "listening" | "thinking" | "speaking" | "compacting";
 let currentState: State = "idle";
 let isMuted = false;
 
+// The wake word (server-side; see wakeword.py). While asleep the orb rests at
+// "idle" and the status line says what to say. The server sends the state in
+// the `config` frame and a `wake` frame whenever it changes.
+let wakeEnabled = false;
+let awake = true;
+let wakePhrase = "Hey Jarvis";
+
+/** Where the orb settles when nothing is happening. */
+function restingState(): State {
+  return isMuted || (wakeEnabled && !awake) ? "idle" : "listening";
+}
+
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
 
@@ -31,8 +43,9 @@ function showError(msg: string) {
 }
 
 function updateStatus(state: State) {
+  const asleep = wakeEnabled && !awake && !isMuted;
   const labels: Record<State, string> = {
-    idle: "",
+    idle: asleep ? `say “${wakePhrase}”` : "",
     listening: "listening...",
     thinking: "thinking...",
     speaking: "",
@@ -139,7 +152,7 @@ function hush() {
   // Locally first: the round trip is real and silence should be instant.
   audioPlayer.stop();
   socket.send({ type: "hush" });
-  transition(isMuted ? "idle" : "listening");
+  transition(restingState());
 }
 
 hushBtn.addEventListener("click", hush);
@@ -160,6 +173,39 @@ audioPlayer.onNeedsGesture(() => {
 });
 
 // ---------------------------------------------------------------------------
+// The wake word
+// ---------------------------------------------------------------------------
+
+function applyWake(w: Record<string, unknown>, cue: boolean) {
+  wakeEnabled = Boolean(w.enabled);
+  awake = !wakeEnabled || Boolean(w.awake);
+  if (typeof w.phrase === "string" && w.phrase) wakePhrase = w.phrase;
+  if (cue && awake) wakeChime();
+  if (currentState === "idle" || currentState === "listening") {
+    transition(restingState());
+    updateStatus(currentState);   // the hint changes even when the state does not
+  }
+}
+
+/** A short rising chirp: "I heard you", without words to talk over. */
+function wakeChime() {
+  const ctx = audioPlayer.getAnalyser().context as AudioContext;
+  if (ctx.state !== "running") return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const t = ctx.currentTime;
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(880, t);
+  osc.frequency.exponentialRampToValueAtTime(1320, t + 0.12);
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.06, t + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket messages
 // ---------------------------------------------------------------------------
 
@@ -168,6 +214,9 @@ socket.onMessage((msg) => {
 
   if (type === "config") {
     muteMicDuringSpeech = Boolean(msg.muteMicDuringSpeech);
+    if (msg.wake && typeof msg.wake === "object") applyWake(msg.wake as Record<string, unknown>, false);
+  } else if (type === "wake") {
+    applyWake(msg, Boolean(msg.cue));
   } else if (type === "audio") {
     const data = msg.data as string;
     if (data) {
@@ -177,7 +226,7 @@ socket.onMessage((msg) => {
     if (msg.text) console.log("[Auvren]", msg.text);
   } else if (type === "stop") {
     audioPlayer.stop();
-    transition(isMuted ? "idle" : "listening");
+    transition(restingState());
   } else if (type === "drop_queued") {
     audioPlayer.dropQueued();
   } else if (type === "status") {
@@ -185,7 +234,7 @@ socket.onMessage((msg) => {
     if (state === "thinking") transition("thinking");
     else if (state === "speaking") transition("speaking");
     else if (state === "compacting") transition("compacting");
-    else if (state === "idle") transition(isMuted ? "idle" : "listening");
+    else if (state === "idle") transition(restingState());
   } else if (type === "text") {
     // A chunk TTS could not voice: show it instead of losing it
     console.log("[Auvren]", msg.text);
@@ -207,7 +256,7 @@ socket.onMessage((msg) => {
 // Start listening after a brief delay for the orb to render
 setTimeout(() => {
   voiceInput.start();
-  if (currentState !== "speaking") transition("listening");
+  if (currentState !== "speaking") transition(restingState());
 }, 1000);
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
@@ -243,7 +292,7 @@ btnMute.addEventListener("click", (e) => {
     transition("idle");
   } else {
     voiceInput.resume();
-    transition("listening");
+    transition(restingState());
   }
 });
 

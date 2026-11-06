@@ -520,6 +520,26 @@ def _check_local_brain_sync() -> Check:
                  message=f"Ollama has {model} at {url}.")
 
 
+def _check_wake_word_sync() -> Check:
+    """The wake-word engine, when the wake word is on (the default).
+
+    A warning, not a failure: without the engine Auvren still wakes when a
+    transcript opens with the wake word — he is never deaf, only slower and
+    less sure (see wakeword.py).
+    """
+    import wakeword
+    if not wakeword.enabled():
+        return Check(name="wake_word", status=STATUS_OK,
+                     message="The wake word is off (WAKE_WORD=off): Auvren answers everything he hears.")
+    problem = wakeword.engine_problem()
+    if problem:
+        return Check(name="wake_word", status=STATUS_WARN, message=problem,
+                     remedy="pip install -r requirements-wakeword.txt, then "
+                            "python wakeword.py --setup")
+    return Check(name="wake_word", status=STATUS_OK,
+                 message=f"The wake word is ready: \"{wakeword.spoken_phrase()}\".")
+
+
 def _check_anthropic_key_leftover_sync() -> Check:
     """A leftover ANTHROPIC_* var signals a misconfigured .env.
 
@@ -701,12 +721,12 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 # a warning nobody can act on.
 if winplat.IS_WINDOWS:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
-    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync)
 else:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
@@ -777,6 +797,8 @@ def _phrase_for(check: Check) -> str:
         if "FISH_API_KEY" in msg:
             return "I have no Fish Audio key"
         return "my voice isn't installed"
+    if name == "wake_word":
+        return "my wake-word engine isn't installed"
     if name == "local_brain":
         if "does not have the model" in msg:
             return "my local model isn't downloaded"

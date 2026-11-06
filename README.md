@@ -5,7 +5,7 @@
 > Auvren began as [`ethanplusai/jarvis`](https://github.com/ethanplusai/jarvis),
 > a macOS project, and is being rebuilt for **Windows**. What works today:
 > a local brain (Ollama, offline) that hands coding to Claude Code, voice
-> (Piper, offline), the run pipeline, session watching, the dashboard,
+> (Piper, offline), a wake word ("Hey Jarvis"), the run pipeline, session watching, the dashboard,
 > opening Windows Terminal / Chrome / VS Code, and toast notifications. Not
 > yet on Windows: looking at the screen, answering a session's permission
 > prompt by keystroke, and messaging another session — those say so out loud.
@@ -193,6 +193,23 @@ run, stopping one or creating a project is always read back to you first —
 "Shall I start Claude Code in sitearc, to fix the login bug?" — and happens
 only when you say yes. If Ollama is not running when the server starts,
 Auvren says so and comes up by itself once it is.
+
+**The wake word.** Auvren is asleep until you say **"Hey Jarvis"** (the
+pretrained model; a custom "Hey Auvren" comes later) — the orb dims and the
+page says what to say. He then listens for one request, stays awake while he
+answers, and for a few seconds after, so you can reply "yes" without waking
+him again. Install the local engine for it:
+
+```powershell
+pip install -r requirements-wakeword.txt
+python wakeword.py --setup
+```
+
+Without the engine he still wakes when a request *starts* with "Hey Jarvis"
+or "Auvren", from the transcript — slower and less sure, never deaf. Note that
+Chrome's recogniser is still hearing everything until speech recognition moves
+on-device; the wake word decides what Auvren *acts on*. `WAKE_WORD=off`
+brings back the always-listening behaviour.
 
 `get_piper.ps1` downloads `piper.exe` and one voice (`en_GB-alan-medium`, a
 British male voice; pass `-Voice en_US-ryan-high` or any name from the

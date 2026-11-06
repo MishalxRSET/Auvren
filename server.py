@@ -87,6 +87,7 @@ import tts
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
 import local_brain
 from local_brain import LocalBrain, LocalBrainConfig
+import wakeword
 from speech import Priority, SpeechScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -574,6 +575,116 @@ def _drop_voice_client(ws) -> None:
         speech.transport_gone()
 
 
+# ---------------------------------------------------------------------------
+# The wake word: Auvren is asleep until addressed (see wakeword.py)
+# ---------------------------------------------------------------------------
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+wake_gate = wakeword.WakeGate(
+    enabled=wakeword.enabled(),
+    window=_float_env("WAKE_WINDOW_SEC", 8.0),
+    follow_up=_float_env("WAKE_FOLLOW_UP_SEC", 8.0))
+wake_listener: Optional[wakeword.WakeListener] = None
+_wake_sleep_timer: Optional[asyncio.TimerHandle] = None
+_WAKE_HOLDING_STATES = ("thinking", "speaking", "compacting")
+
+
+def _wake_frame() -> dict:
+    return {"type": "wake", "enabled": wake_gate.enabled, "awake": wake_gate.awake,
+            "phrase": wakeword.spoken_phrase()}
+
+
+def _wake_on_status(msg: dict) -> None:
+    """Every status frame the server sends is also the gate's cue: awake
+    while Auvren thinks or speaks, then a follow-up window once he is done,
+    so an answer to his question needs no second wake word."""
+    if not wake_gate.enabled or msg.get("type") != "status":
+        return
+    state = msg.get("state")
+    if state in _WAKE_HOLDING_STATES:
+        wake_gate.hold()
+    elif state == "idle":
+        wake_gate.release()
+        _schedule_wake_sleep()
+
+
+def _schedule_wake_sleep() -> None:
+    """Tell the browser when the window closes, so the orb goes to sleep."""
+    global _wake_sleep_timer
+    if _wake_sleep_timer is not None:
+        _wake_sleep_timer.cancel()
+        _wake_sleep_timer = None
+    left = wake_gate.seconds_left
+    if not wake_gate.enabled or left == float("inf"):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _wake_sleep_timer = loop.call_later(left + 0.05, lambda: _spawn(_wake_sleep_check()))
+
+
+async def _wake_sleep_check() -> None:
+    if wake_gate.awake:
+        _schedule_wake_sleep()        # extended meanwhile; look again later
+        return
+    log.info("wake: asleep")
+    await _voice_emit(_wake_frame())
+
+
+async def _wake_up(source: str, score: Optional[float] = None,
+                   was_awake: Optional[bool] = None) -> None:
+    """The wake word was heard — by the engine ("audio") or in a transcript.
+
+    `was_awake` is passed by callers whose gate call has ALREADY opened the
+    window, so the browser still hears that Auvren just woke."""
+    if not wake_gate.enabled:
+        return
+    if was_awake is None:
+        was_awake = wake_gate.awake
+    wake_gate.open()
+    log.info("wake: %s%s", source, f" ({score:.2f})" if score is not None else "")
+    if not was_awake or source == "audio":
+        await _voice_emit({**_wake_frame(), "cue": True})
+    _schedule_wake_sleep()
+
+
+def _start_wake_listener() -> None:
+    """Start the wake-word engine if it is installed. Never raises: without
+    it, a transcript that opens with the wake word still wakes Auvren."""
+    global wake_listener
+    if not wake_gate.enabled or wake_listener is not None:
+        return
+    problem = wakeword.engine_problem()
+    if problem:
+        log.warning("wake word: engine off (%s); the transcript wake still works", problem)
+        return
+    loop = asyncio.get_running_loop()
+
+    def heard(score: float) -> None:          # called on the listener's thread
+        loop.call_soon_threadsafe(lambda: _spawn(_wake_up("audio", score)))
+
+    listener = wakeword.WakeListener(heard, threshold=_float_env("WAKE_THRESHOLD", 0.5))
+    problem = listener.start()
+    if problem:
+        log.warning("wake word: engine off (%s)", problem)
+        return
+    wake_listener = listener
+
+
+def _stop_wake_listener() -> None:
+    global wake_listener
+    listener, wake_listener = wake_listener, None
+    if listener is not None:
+        listener.stop()
+
+
 async def _voice_emit(msg: dict) -> None:
     """Hand one protocol message to every connected voice client.
 
@@ -584,6 +695,7 @@ async def _voice_emit(msg: dict) -> None:
     for an ack that can never come. Status frames with nobody listening are
     simply lost.
     """
+    _wake_on_status(msg)
     delivered = 0
     for ws in list(voice_clients):
         queue = _voice_queues.get(ws)
@@ -1173,6 +1285,7 @@ async def stop_brain_and_speech() -> None:
         raise
     except Exception as e:
         log.warning(f"shutdown journal failed: {e}")
+    _stop_wake_listener()
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
                         ("tts client", _tts_client.aclose() if _tts_client else None)):
@@ -1814,6 +1927,7 @@ async def lifespan(application: FastAPI):
     run_store.sweep_stale_runs()
 
     await start_brain_and_speech()
+    _start_wake_listener()
     await start_session_watcher()
     # Deliberately not awaited: every check is time-boxed to 5s, so running
     # them inline could hold the server closed for that long before the UI can
@@ -6605,6 +6719,9 @@ async def voice_handler(ws: WebSocket):
         {"type": "drop_queued"}                      keep the playing chunk, drop the rest
         {"type": "status", "state": "thinking"|"speaking"|"idle"}
         {"type": "text", "text": "..."}              a chunk TTS could not voice
+        {"type": "wake", "enabled": true, "awake": false, "phrase": "Hey Jarvis",
+         "cue": true}                                the wake word opened (cue) or
+                                                     the listening window closed
 
     Run lifecycle events are published on /ws/runs, not here.
     """
@@ -6615,7 +6732,8 @@ async def voice_handler(ws: WebSocket):
         # Through this client's own queue, not straight down the socket, so
         # the opening frames cannot be overtaken by a broadcast that lands
         # while they are in flight.
-        _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH})
+        _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH,
+                         "wake": _wake_frame()})
         _enqueue(queue, {"type": "status", "state": "idle"})
 
         global _last_greeting_time
@@ -6663,7 +6781,13 @@ async def voice_handler(ws: WebSocket):
                 # wrong happened after this point.
                 text = str(msg.get("text", ""))
                 log.info("mic-hears: %s", text[-70:])
-                await speech.user_interim(text)
+                was_awake = wake_gate.awake
+                gate = wake_gate.on_interim(text)
+                if gate == "wake":
+                    await _wake_up("transcript", was_awake=was_awake)
+                if gate != "ignore":
+                    # Asleep, somebody else's voice must not cut Auvren off.
+                    await speech.user_interim(text)
             elif kind == "played":
                 try:
                     # OverflowError is in there because `int(float('inf'))`
@@ -6676,6 +6800,19 @@ async def voice_handler(ws: WebSocket):
                 text = apply_speech_corrections(str(msg.get("text", "")).strip())
                 if not text:
                     continue
+                was_awake = wake_gate.awake
+                gate, request = wake_gate.on_final(text)
+                if gate == "ignore":
+                    log.info(f"User (asleep, ignored): {text}")
+                    continue
+                if gate == "wake":
+                    log.info(f"User (wake word only): {text}")
+                    await _wake_up("transcript", was_awake=was_awake)
+                    continue
+                if request != text:
+                    log.info(f"User (wake word): {text}")
+                    await _wake_up("transcript", was_awake=was_awake)
+                text = request
                 verdict = await speech.user_final(text)
                 if verdict == "replay":
                     # "Say that again": resend what was already synthesized —

@@ -1,0 +1,13 @@
+# Optional: the wake-word engine ("Hey Jarvis" until a custom "Hey Auvren" is
+# trained). Without these Auvren still wakes when a transcript starts with the
+# wake word; with them the wake word is heard locally, on this machine.
+#
+#   pip install -r requirements-wakeword.txt
+#   python wakeword.py --setup        # downloads the model files, lists mics
+#
+# Kept out of requirements.txt on purpose: openWakeWord pulls in onnxruntime,
+# scipy and scikit-learn, and on Linux tflite-runtime, which has no wheels
+# for recent Pythons -- CI and the test suite do not need any of it.
+openwakeword==0.6.0
+sounddevice>=0.4.6
+numpy>=1.24
