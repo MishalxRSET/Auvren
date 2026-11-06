@@ -52,6 +52,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import winplat
+
 log = logging.getLogger("jarvis.screen")
 
 # Each of these must finish WELL inside `jarvis_mcp.TIMEOUT_SEC` (20s), and
@@ -93,6 +95,12 @@ BLANK_SAMPLE_EDGE = 32
 # is "one colour". Measured on this machine: a real 1280x720 screenshot's
 # channels sit around 20; a solid fill is exactly 0.
 BLANK_MAD = 1.5
+
+
+# Phase 2 of the Windows port replaces screencapture/sips/osascript with a
+# Windows capture. Until then both entry points refuse in a sentence that can
+# be spoken, rather than spawning macOS binaries that are not there.
+NOT_ON_WINDOWS = "I can't see your screen on Windows yet, sir"
 
 
 class ScreenError(Exception):
@@ -286,6 +294,8 @@ async def capture_screen(display: int | None = None) -> Shot:
 
     Call this ONLY on a turn the user drove. See the module docstring.
     """
+    if winplat.IS_WINDOWS:
+        raise ScreenError(NOT_ON_WINDOWS)
     if screen_recording_granted() is False:
         raise ScreenError(_NO_PERMISSION)
 
@@ -386,6 +396,8 @@ async def list_windows() -> list[Window]:
     Raises ScreenError when Accessibility is missing. An empty list would have
     JARVIS say "nothing is open" — a lie with a remedy attached.
     """
+    if winplat.IS_WINDOWS:
+        raise ScreenError(NOT_ON_WINDOWS)
     rc, stdout, stderr = await _run("osascript", "-e", _WINDOWS_SCRIPT,
                                     timeout=WINDOWS_TIMEOUT_SEC)
     if rc != 0:

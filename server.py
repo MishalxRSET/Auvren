@@ -17,7 +17,6 @@ import os
 import difflib
 import re
 import secrets
-import shlex
 import sys
 import sqlite3
 import threading
@@ -3532,8 +3531,7 @@ async def _perform_command(item: _StagedCommand) -> None:
         # wrong directory, and the path is quoted while the command itself has
         # already been through `builds.command_problem`, which permits no
         # shell metacharacter at all.
-        result = await actions.open_terminal(
-            f"cd {shlex.quote(item.path)} && {item.command}")
+        result = await actions.open_terminal(item.path, item.command)
         if result.get("success"):
             record("ran")
             await speech.say(
@@ -4854,14 +4852,14 @@ async def tool_open_in_browser(args: dict) -> str:
 
 
 async def tool_open_in_terminal(args: dict) -> str:
-    """Open Terminal.app in a project directory."""
+    """Open Windows Terminal in a project directory."""
     reference = str(args.get("project") or "").strip()
     if not reference:
         return "Which project, sir?"
     name, path, problem = _resolve_project_or_explain(reference)
     if problem:
         return problem
-    result = await actions.open_terminal(f"cd {shlex.quote(path)}")
+    result = await actions.open_terminal(path)
     if not result.get("success"):
         return result.get("confirmation") or "Terminal wouldn't open, sir."
     return f"Terminal's open in {name}, sir."
@@ -6542,7 +6540,7 @@ async def api_project_open(body: ProjectOpenRequest):
     if body.target == "editor":
         result = await actions.open_in_editor(body.path)
     elif body.target == "terminal":
-        result = await actions.open_terminal(f"cd {shlex.quote(body.path)}")
+        result = await actions.open_terminal(body.path)
     elif body.target == "browser":
         result = await actions.open_browser(Path(body.path).as_uri())
     else:
@@ -7011,11 +7009,19 @@ if __name__ == "__main__":
     os.environ["JARVIS_SCHEME"] = proto
     os.environ["JARVIS_BIND_HOST"] = args.host
 
+    reload = args.reload
+    if reload and sys.platform == "win32":
+        # uvicorn's reloader installs the Selector event loop on Windows, and
+        # asyncio cannot spawn subprocesses on that loop: the brain and every
+        # run would fail to start. Refuse it rather than come up mute.
+        print("  --reload is not supported on Windows (it breaks subprocesses); ignoring it.")
+        reload = False
+
     uvicorn.run(
         "server:app",
         host=args.host,
         port=args.port,
-        reload=args.reload,
+        reload=reload,
         log_level="info",
         **ssl_kwargs,
     )

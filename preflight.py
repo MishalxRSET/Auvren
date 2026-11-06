@@ -39,6 +39,7 @@ from typing import Optional
 
 import claude_env
 import screen
+import winplat
 
 log = logging.getLogger("jarvis.preflight")
 
@@ -133,6 +134,25 @@ def _parse_version(text: str) -> Optional[tuple[int, int, int]]:
 
 # ── individual checks ────────────────────────────────────────────────────
 
+def _launchable(claude: str, name: str) -> tuple[list[str], Optional[Check]]:
+    """The argv the brain will actually exec, or the Check explaining why not.
+
+    On Windows `claude` on PATH is usually npm's `claude.cmd`, which the brain
+    refuses to exec (see winplat.claude_argv). Resolving it HERE, the same
+    way, means a launcher the brain cannot use fails at startup with a
+    remedy, instead of on the first thing the user says.
+    """
+    override = os.getenv("JARVIS_CLAUDE_PATH") or None
+    if not winplat.IS_WINDOWS and not override:
+        return [claude], None
+    try:
+        return winplat.claude_argv(override or claude), None
+    except winplat.ClaudeLaunchError as e:
+        return [], Check(name=name, status=STATUS_FAIL, message=str(e),
+                         remedy="Install the native Claude Code build "
+                                "(irm https://claude.ai/install.ps1 | iex), or "
+                                "set JARVIS_CLAUDE_PATH to claude.exe.")
+
 async def _check_claude_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     """`claude` is on PATH and is at least MIN_CLAUDE_VERSION."""
     claude = shutil.which("claude")
@@ -147,7 +167,10 @@ async def _check_claude_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
             ),
         )
 
-    rc, stdout, stderr = await _run_subprocess(claude, "--version", timeout=timeout)
+    launch, problem = _launchable(claude, "claude_cli")
+    if problem:
+        return problem
+    rc, stdout, stderr = await _run_subprocess(*launch, "--version", timeout=timeout)
     if rc != 0:
         return Check(
             name="claude_cli",
@@ -283,7 +306,10 @@ async def _check_claude_login(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     config_dir = _config_dir_from_env(env)
     where = f"config dir: {config_dir}"
 
-    rc, stdout, stderr = await _run_subprocess(claude, "auth", "status", timeout=timeout, env=env)
+    launch, problem = _launchable(claude, "claude_login")
+    if problem:
+        return problem
+    rc, stdout, stderr = await _run_subprocess(*launch, "auth", "status", timeout=timeout, env=env)
     if rc != 0:
         return Check(
             name="claude_login",
@@ -626,9 +652,18 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 
 # ── running them all ─────────────────────────────────────────────────────
 
-_ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-_SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
-                _check_cross_session_inbound_sync, _check_screen_recording_sync)
+# Accessibility and Screen Recording are macOS permissions, and the features
+# they guard (answering a dialog, seeing the screen) are phase 2 of the
+# Windows port. On Windows they are not run at all, rather than reported as
+# a warning nobody can act on.
+if winplat.IS_WINDOWS:
+    _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
+    _SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+                    _check_cross_session_inbound_sync)
+else:
+    _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
+    _SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+                    _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
 async def _run_one(fn, *, is_async: bool, timeout: float) -> Check:

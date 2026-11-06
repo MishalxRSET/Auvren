@@ -15,12 +15,12 @@ import asyncio
 import logging
 import math
 import os
-import shlex
 import shutil
 import time
 from typing import Callable
 
 import claude_env
+import winplat
 import stream_parser
 
 log = logging.getLogger("jarvis.run_executor")
@@ -401,10 +401,16 @@ class RunExecutor:
         """
         if proc.returncode is not None:
             return
-        try:
-            proc.terminate()
-        except (ProcessLookupError, OSError):
-            pass
+        if winplat.IS_WINDOWS:
+            # No SIGTERM on Windows: terminate() is TerminateProcess on the
+            # parent alone, orphaning every shell and test runner the run
+            # started. End the whole tree instead (winplat, fact 3).
+            await asyncio.to_thread(winplat.kill_tree, proc.pid)
+        else:
+            try:
+                proc.terminate()
+            except (ProcessLookupError, OSError):
+                pass
         try:
             await asyncio.wait_for(asyncio.shield(proc.wait()),
                                    timeout=self._grace_sec)
@@ -441,7 +447,7 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        base = winplat.claude_argv(self._claude_path)
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:
@@ -595,7 +601,8 @@ class RunExecutor:
                     # diff). See claude_env.STREAM_LINE_LIMIT.
                     limit=claude_env.STREAM_LINE_LIMIT,
                 )
-            except (FileNotFoundError, NotADirectoryError, PermissionError) as e:
+            except (FileNotFoundError, NotADirectoryError, PermissionError,
+                    winplat.ClaudeLaunchError) as e:
                 await self._finish(run_id, self._store.RunStatus.FAILED,
                                    error=f"could not start claude: {e}")
                 return

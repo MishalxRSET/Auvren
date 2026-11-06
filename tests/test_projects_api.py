@@ -57,8 +57,8 @@ class _Actions:
         return {"success": self.success, "editor": "VS Code",
                 "confirmation": "Opened, sir."}
 
-    async def open_terminal(self, command=""):
-        self.terminal.append(command)
+    async def open_terminal(self, cwd=None, command=None):
+        self.terminal.append((cwd, command))
         return {"success": self.success, "confirmation": "Terminal's open, sir."}
 
     async def open_browser(self, url, browser="chrome"):
@@ -204,7 +204,7 @@ def test_open_in_terminal_calls_actions(wired, monkeypatch):
         r = c.post("/api/projects/open",
                    json={"name": "chitauri", "path": "/p/chitauri", "target": "terminal"})
     assert r.status_code == 200
-    assert fake.terminal == ["cd /p/chitauri"]
+    assert fake.terminal == [("/p/chitauri", None)]
 
 
 def test_open_in_browser_calls_actions_with_a_file_uri(wired, monkeypatch):

@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import winplat
+
 # Both roots must be read: the CLI's default and the one Orcha sets via
 # CLAUDE_CONFIG_DIR. On the dev machine `~/.claude/sessions` was empty and
 # every session lived under `~/.claude-orcha` — a plain-Terminal user is the
@@ -40,20 +42,13 @@ def config_roots() -> list[Path]:
 
 
 def pid_alive(pid) -> bool:
-    """True if the process exists. Signal 0 checks without touching it.
+    """True if the process exists. Reads only — never signals it.
 
-    `pid` must be a positive integer: 0 means "this process's group" and a
-    negative pid means "that group" to `os.kill`, neither of which is a real
-    process, so both are rejected before the syscall.
+    Delegates to `winplat.pid_alive`: on Windows `os.kill(pid, 0)` is not a
+    probe, it is TerminateProcess, and this runs once a second against every
+    Claude Code session on the machine.
     """
-    try:
-        pid = int(pid)
-        if pid <= 0:
-            return False
-        os.kill(pid, 0)
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
+    return winplat.pid_alive(pid)
 
 
 def encode_cwd(cwd: str) -> str:

@@ -53,7 +53,13 @@ def post_to_session(socket_path: str | None, prompt: str,
                              "message": {"role": "user", "content": prompt.strip()}}))
     payload = ("\n".join(lines) + "\n").encode()
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
+        # Python on Windows does not expose AF_UNIX, and what Claude Code
+        # binds on Windows for this inbox is not yet known (phase 2 of the
+        # port). Nothing is sent; say so as a failure, not as "sent".
+        return FAILED
+    sock = socket.socket(family, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         sock.connect(socket_path)

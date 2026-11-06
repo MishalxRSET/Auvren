@@ -1,248 +1,241 @@
 """
-JARVIS Action Executor — AppleScript-based system actions.
+Auvren Action Executor — Windows system actions.
 
-Execute actions IMMEDIATELY, before generating any LLM response.
-Each function returns {"success": bool, "confirmation": str}.
+Opens Windows Terminal, the browser and the editor. Each function returns
+{"success": bool, "confirmation": str}.
+
+The one rule for this file: **every program is exec'd directly, with its
+arguments as separate argv entries, and never through `cmd.exe`.** The text
+reaching these functions comes from a model, out of speech, possibly echoing a
+web page or a README. `cmd.exe` re-parses a command line with its own
+metacharacters (`&`, `|`, `%VAR%`) and quoting rules that Python's
+`list2cmdline` does not model, so anything routed through it — a `.cmd` shim,
+`start`, `shell=True` — is a path from that text to a shell. That is also why
+VS Code is launched as `Code.exe`, not through its `code.cmd` shim, and why
+the fallbacks are `notepad.exe` / `explorer.exe` rather than `os.startfile`
+(which would RUN a `.py` or `.bat` file associated with an interpreter instead
+of opening it for reading).
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import re
 import shutil
+import subprocess
+from pathlib import Path
+
+import winplat
 
 log = logging.getLogger("jarvis.actions")
 
-async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
-    """Temporarily set the front Terminal window to Ocean theme, then revert.
 
-    Shows the user JARVIS is active in that terminal. Reverts after revert_after seconds.
+async def _spawn(argv: list[str], *, cwd: str | None = None,
+                 new_console: bool = False) -> tuple[bool, str]:
+    """Start a GUI/console program and return (started, error).
+
+    Launchers like Code.exe and chrome.exe hand off to an already-running
+    instance and exit, so "started" means the exec succeeded and the process
+    did not exit non-zero within a short window — not that a window is now
+    visible. Output goes to DEVNULL, never a pipe: a long-lived window
+    writing into a pipe nobody drains would eventually block on it.
     """
-    # Save the current profile, switch to Ocean, then revert
-    script_save = (
-        'tell application "Terminal"\n'
-        '    return name of current settings of front window\n'
-        'end tell'
-    )
+    flags = 0
+    if winplat.IS_WINDOWS:
+        flags = (subprocess.CREATE_NEW_CONSOLE if new_console
+                 else subprocess.DETACHED_PROCESS)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script_save,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            *argv, cwd=cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            creationflags=flags,
         )
-        stdout, _ = await proc.communicate()
-        original_profile = stdout.decode().strip()
-
-        # Switch to Ocean
-        script_set = (
-            'tell application "Terminal"\n'
-            '    set current settings of front window to settings set "Ocean"\n'
-            'end tell'
-        )
-        proc2 = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script_set,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc2.communicate()
-
-        # Schedule revert
-        if original_profile and original_profile != "Ocean":
-            asyncio.get_event_loop().call_later(
-                revert_after,
-                lambda: asyncio.ensure_future(_revert_terminal_theme(original_profile))
-            )
-    except Exception:
-        pass
-
-
-async def _revert_terminal_theme(profile_name: str):
-    """Revert a Terminal window back to its original profile."""
-    escaped = applescript_escape(profile_name)
-    script = (
-        'tell application "Terminal"\n'
-        f'    set current settings of front window to settings set "{escaped}"\n'
-        'end tell'
-    )
+    except OSError as e:
+        return False, str(e)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-    except Exception:
-        pass
+        code = await asyncio.wait_for(proc.wait(), timeout=3.0)
+    except asyncio.TimeoutError:
+        return True, ""          # still running: a long-lived window, fine
+    if code != 0:
+        return False, f"{Path(argv[0]).name} exited {code}"
+    return True, ""
 
 
-def applescript_escape(s: str) -> str:
-    """Escape a string for safe embedding in an AppleScript double-quoted string."""
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
+# --- Windows Terminal --------------------------------------------------------
+
+def _windows_terminal() -> str | None:
+    """`wt.exe`, the Windows Terminal app-execution alias, or None."""
+    found = shutil.which("wt.exe") or shutil.which("wt")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        alias = Path(local) / "Microsoft" / "WindowsApps" / "wt.exe"
+        if alias.exists():
+            return str(alias)
+    return None
 
 
-async def open_terminal(command: str = "") -> dict:
-    """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
+def _wt_escape(arg: str) -> str:
+    """`wt` splits its own command line on `;` into subcommands. Escape it."""
+    return arg.replace(";", r"\;")
+
+
+def terminal_argv(cwd: str | None, command: str | None) -> tuple[list[str], bool]:
+    """The argv that opens a terminal in `cwd` running `command`.
+
+    Returns (argv, needs_new_console). Windows Terminal when installed,
+    otherwise a plain PowerShell console. The shell is always PowerShell with
+    -NoExit, so the window stays open and the user can see what ran and stop
+    it. `command` has already passed `builds.command_problem`, whose
+    allowlist admits none of PowerShell's metacharacters (`$`, backtick,
+    `;`, `&`, `|`, parentheses, braces).
+    """
+    shell = [winplat.powershell_exe(), "-NoLogo", "-NoExit"]
     if command:
-        escaped = applescript_escape(command)
-        script = (
-            'tell application "Terminal"\n'
-            "    activate\n"
-            f'    do script "{escaped}"\n'
-            "end tell"
-        )
-    else:
-        script = (
-            'tell application "Terminal"\n'
-            "    activate\n"
-            "end tell"
-        )
-    proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    success = proc.returncode == 0
-    if not success:
-        log.error(f"open_terminal failed: {stderr.decode()}")
-    else:
-        await _mark_terminal_as_jarvis()
+        shell += ["-Command", command]
+    wt = _windows_terminal()
+    if wt:
+        argv = [wt, "new-tab"]
+        if cwd:
+            argv += ["-d", _wt_escape(cwd)]
+        argv += [_wt_escape(a) for a in shell]
+        return argv, False
+    return shell, True
+
+
+async def open_terminal(cwd: str | None = None, command: str | None = None) -> dict:
+    """Open a terminal window in `cwd`, optionally running one vetted command."""
+    if cwd and not Path(cwd).is_dir():
+        return {"success": False,
+                "confirmation": "That folder isn't there any more, sir."}
+    argv, new_console = terminal_argv(cwd, command)
+    ok, err = await _spawn(argv, cwd=cwd or None, new_console=new_console)
+    if not ok:
+        log.error(f"open_terminal failed: {err}")
     return {
-        "success": success,
-        "confirmation": "Terminal is open, sir." if success else "I had trouble opening Terminal, sir.",
+        "success": ok,
+        "confirmation": "Terminal is open, sir." if ok
+        else "I had trouble opening a terminal, sir.",
     }
+
+
+# --- browsers ----------------------------------------------------------------
+
+_BROWSER_EXES = {
+    "chrome": (r"Google\Chrome\Application\chrome.exe", "Chrome"),
+    "firefox": (r"Mozilla Firefox\firefox.exe", "Firefox"),
+}
+
+# A URL becomes ONE argv entry of chrome.exe/firefox.exe. Both treat an entry
+# starting with `-` as a switch, and Chrome has switches that run programs
+# (`--renderer-cmd-prefix`, `--utility-cmd-prefix`). Requiring a scheme
+# prefix makes that impossible: nothing starting `http` or `file:` is a switch.
+_OPENABLE = re.compile(r"^(https?://|file:///)", re.IGNORECASE)
+
+
+def browser_exe(browser: str) -> str | None:
+    """The browser's own executable, from the standard install locations."""
+    rel, _name = _BROWSER_EXES.get(browser, _BROWSER_EXES["chrome"])
+    roots = [os.environ.get(v) for v in
+             ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
+    for root in roots:
+        if root:
+            exe = Path(root) / rel
+            if exe.is_file():
+                return str(exe)
+    return shutil.which(Path(rel).name)
 
 
 async def open_browser(url: str, browser: str = "chrome") -> dict:
-    """Open URL in user's browser (Chrome or Firefox).
-
-    The URL goes through `applescript_escape` and nothing else. A hand-rolled
-    `.replace('"', ...)` lived here and escaped the quote but not the
-    BACKSLASH, which is the half that matters: AppleScript reads `\\\\` as one
-    literal backslash, so a URL ending `x\\"` closes the string literal and
-    everything after it is code — and `do shell script` is in that language.
-    The URL arrives from a model, out of speech, possibly echoing a page or a
-    README, so this is a straight line from attacker text to a shell.
-    `tests/test_applescript_url_injection.py` runs the payload.
-    """
-    escaped_url = applescript_escape(url)
-
-    if browser.lower() == "firefox":
-        app_name = "Firefox"
-        script = (
-            'tell application "Firefox"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
-    else:
-        app_name = "Chrome"
-        script = (
-            'tell application "Google Chrome"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
-
-    proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    success = proc.returncode == 0
-    if not success:
-        log.error(f"open_browser ({app_name}) failed: {stderr.decode()}")
+    """Open a web or file URL in Chrome or Firefox."""
+    browser = "firefox" if browser.lower() == "firefox" else "chrome"
+    app_name = _BROWSER_EXES[browser][1]
+    if not _OPENABLE.match(url or "") or any(c in url for c in "\r\n\x00"):
+        return {"success": False,
+                "confirmation": "I only open web addresses and files, sir."}
+    exe = browser_exe(browser)
+    if exe is None:
+        return {"success": False,
+                "confirmation": f"I can't find {app_name} on this machine, sir."}
+    ok, err = await _spawn([exe, url])
+    if not ok:
+        log.error(f"open_browser ({app_name}) failed: {err}")
     return {
-        "success": success,
-        "confirmation": f"Pulled that up in {app_name}, sir." if success else f"{app_name} ran into a problem, sir.",
+        "success": ok,
+        "confirmation": f"Pulled that up in {app_name}, sir." if ok
+        else f"{app_name} ran into a problem, sir.",
     }
 
 
-# Keep backward compat
 async def open_chrome(url: str) -> dict:
     return await open_browser(url, "chrome")
 
 
-async def get_chrome_tab_info() -> dict:
-    """Read the current Chrome tab's title and URL via AppleScript."""
-    script = (
-        'tell application "Google Chrome"\n'
-        "    set tabTitle to title of active tab of front window\n"
-        "    set tabURL to URL of active tab of front window\n"
-        '    return tabTitle & "|" & tabURL\n'
-        "end tell"
-    )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode == 0:
-            result = stdout.decode().strip()
-            parts = result.split("|", 1)
-            if len(parts) == 2:
-                return {"title": parts[0], "url": parts[1]}
-        return {}
-    except Exception as e:
-        log.warning(f"get_chrome_tab_info failed: {e}")
-        return {}
-
-
-# --- Opening code where the user actually reads it -----------------------
+# --- Opening code where the user actually reads it ---------------------------
 #
-# The user's words: "maybe he should be able to open code files in VS Code or
-# text editor." VS Code first when it is installed, the system default
-# otherwise, so this still works on a Mac that has never had it.
-#
-# No AppleScript and no shell: `open` is exec'd with the path as its own argv
-# entry, so a filename cannot be quoted out of a script the way it can out of
-# an AppleScript string literal. Containment and the sensitive-file wall are
-# the CALLER's job and have already run by the time this is reached — see
-# server.tool_open_in_editor.
+# VS Code first when it is installed, a plain reader otherwise. Containment and
+# the sensitive-file wall are the CALLER's job and have already run by the time
+# this is reached — see server.tool_open_in_editor.
 
-VSCODE_APP = "/Applications/Visual Studio Code.app"
+def _vscode_exe() -> str | None:
+    """VS Code's `Code.exe`, never its `bin\\code.cmd` shim (see module doc)."""
+    candidates = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(var)
+        if root:
+            candidates.append(Path(root) / "Microsoft VS Code" / "Code.exe")
+    shim = shutil.which("code")
+    if shim:
+        # <install>\bin\code.cmd -> <install>\Code.exe
+        candidates.append(Path(shim).resolve().parent.parent / "Code.exe")
+    for exe in candidates:
+        if exe.is_file():
+            return str(exe)
+    return None
 
 
 def _vscode_command(path: str) -> list[str] | None:
     """The argv that opens `path` in VS Code, or None if it is not installed."""
-    binary = shutil.which("code")
-    if binary:
-        return [binary, str(path)]
-    if os.path.isdir(VSCODE_APP):
-        return ["open", "-a", VSCODE_APP, str(path)]
-    return None
+    exe = _vscode_exe()
+    return [exe, str(path)] if exe else None
+
+
+def _fallback_command(path: str) -> tuple[list[str], str]:
+    """Explorer for a folder, Notepad for a file — both only display."""
+    if Path(path).is_dir():
+        return [str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"),
+                str(path)], "Explorer"
+    return [winplat.system32_exe("notepad.exe"), str(path)], "Notepad"
 
 
 async def open_in_editor(path: str) -> dict:
-    """Open a file or directory in VS Code, else in the system default."""
+    """Open a file or directory in VS Code, else Notepad / Explorer."""
+    path = str(path)
+    if path.startswith("-"):
+        # An argv entry starting `-` is a switch to Code.exe. The caller hands
+        # us resolved absolute paths, so this never fires; it stays as a wall.
+        return {"success": False, "editor": "your editor",
+                "confirmation": "I couldn't open an editor, sir."}
     argv = _vscode_command(path)
     editor = "VS Code"
     if argv is None:
-        argv = ["open", str(path)]
-        editor = "your editor"
+        argv, editor = _fallback_command(path)
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        success = proc.returncode == 0
-    except OSError as e:
-        log.error(f"open_in_editor could not launch: {e}")
-        return {"success": False, "editor": editor,
-                "confirmation": "I couldn't open an editor, sir."}
-
-    if not success:
-        log.error(f"open_in_editor failed: {stderr.decode(errors='replace')}")
+    ok, err = await _spawn(argv)
+    if not ok:
+        log.error(f"open_in_editor failed: {err}")
     return {
-        "success": success,
+        "success": ok,
         "editor": editor,
-        "confirmation": f"Opened that in {editor}, sir." if success
+        "confirmation": f"Opened that in {editor}, sir." if ok
         else f"{editor} wouldn't open that, sir.",
     }
 
@@ -272,4 +265,4 @@ def _generate_project_name(prompt: str) -> str:
             "on", "desktop", "that", "application", "app", "full", "stack", "simple",
             "web", "page", "site", "named"}
     meaningful = [w for w in words if w not in skip and len(w) > 2][:4]
-    return "-".join(meaningful) if meaningful else "jarvis-project"
+    return "-".join(meaningful) if meaningful else "auvren-project"

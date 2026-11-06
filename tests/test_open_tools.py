@@ -38,8 +38,8 @@ class _Actions:
                 "confirmation": f"Pulled that up in {app}, sir."
                 if self.success else f"{app} ran into a problem, sir."}
 
-    async def open_terminal(self, command=""):
-        self.terminal.append(command)
+    async def open_terminal(self, cwd=None, command=None):
+        self.terminal.append((cwd, command))
         return {"success": self.success,
                 "confirmation": "Terminal is open, sir."
                 if self.success else "I had trouble opening Terminal, sir."}
@@ -256,8 +256,9 @@ async def test_a_browser_that_will_not_start_is_reported(ready, monkeypatch):
 async def test_a_terminal_opens_in_the_project(ready):
     server, fake, project = ready
     out = await server.tool_open_in_terminal({"project": "tony-starks-website"})
-    import shlex
-    assert fake.terminal == [f"cd {shlex.quote(str(project))}"]
+    # The folder is passed as the terminal's working directory, never
+    # spliced into a shell command string.
+    assert fake.terminal == [(str(project), None)]
     assert "tony-starks-website" in out
 
 
