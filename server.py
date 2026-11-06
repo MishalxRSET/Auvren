@@ -679,6 +679,9 @@ async def _wake_up(source: str, score: Optional[float] = None,
     the on-device ears are paused while he speaks, the engine is not."""
     if not wake_gate.enabled or (source == "audio" and _mic_muted):
         return
+    if source == "audio" and time.monotonic() < _name_spoken_until:
+        log.info("wake: ignored (%.2f), he has just said his own name", score or 0.0)
+        return
     if source == "audio" and speech is not None and speech.is_speaking:
         await speech.barge_in(keep_unread=False, reason="wake word")
     if was_awake is None:
@@ -959,11 +962,12 @@ def _set_mic_muted(muted: bool) -> None:
 
 
 def _ears_should_transcribe() -> bool:
-    """Called on the ears' thread when an utterance ends. With the wake
-    engine running, nothing is transcribed while Auvren is asleep — the
-    engine decides. Without it the words ARE the wake word, so everything
-    is (on this machine, and kept nowhere)."""
-    if not wake_gate.enabled or wake_listener is None:
+    """Called on the ears' thread when an utterance ends. With a TRUSTED
+    wake engine running, nothing is transcribed while Auvren is asleep — the
+    engine decides. Otherwise the words ARE the wake word (or back up an
+    engine trained only on synthetic voices), so everything is: on this
+    machine, and kept nowhere."""
+    if not wake_gate.enabled or wake_listener is None or not wakeword.engine_trusted():
         return True
     return wake_gate.awake
 
@@ -1060,7 +1064,23 @@ async def _voice_emit(msg: dict) -> None:
         raise NoVoiceClient("no voice client connected")
 
 
+# The wake engine hears the speakers too, and "Auvren" is in his own lines
+# ("Auvren at your service"); said as "Ovren" — exactly what the trained model
+# listens for. Synthesis runs a chunk or two ahead of playback, so the guard
+# is generous: a wake heard from the engine within it is his own voice.
+_NAME_SPOKEN = re.compile(r"\bauvren\b", re.IGNORECASE)
+_name_spoken_until = 0.0
+
+
+def _note_own_name(text: str) -> None:
+    global _name_spoken_until
+    if _NAME_SPOKEN.search(text or ""):
+        _name_spoken_until = max(_name_spoken_until,
+                                 time.monotonic() + 20.0 + len(text) / 10.0)
+
+
 async def _synth_for_speech(text: str) -> Optional[bytes]:
+    _note_own_name(text)
     r = await tts.synthesize(text, fish_api_key=FISH_API_KEY, fish_voice_id=FISH_VOICE_ID,
                              client=_tts_client)
     if r is None:

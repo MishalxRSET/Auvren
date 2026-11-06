@@ -520,3 +520,28 @@ def test_the_engine_is_started_when_installed_and_stopped_at_shutdown(monkeypatc
     with TestClient(server.app):
         assert started == [0.5] and server.wake_listener is not None
     assert stopped == [True] and server.wake_listener is None
+
+
+# --- the trained hey_auvren model --------------------------------------------------------------
+
+def test_the_bundled_model_is_found_and_a_retrained_one_wins(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    (bundled / "hey_auvren_v0.1.onnx").write_bytes(b"x")
+    monkeypatch.setattr(w, "BUNDLED_DIR", bundled)
+    assert w.model_files()[0] == bundled / "hey_auvren_v0.1.onnx"
+    mine = tmp_path / "data" / "wakeword"
+    mine.mkdir(parents=True)
+    (mine / "hey_auvren_v0.2.onnx").write_bytes(b"x")
+    assert w.model_files()[0] == mine / "hey_auvren_v0.2.onnx", "a retrained copy wins"
+
+
+def test_a_self_trained_model_is_not_trusted_alone(monkeypatch):
+    monkeypatch.delenv("WAKE_ENGINE_ONLY", raising=False)
+    assert w.engine_trusted() is False, "synthetic voices only: Whisper keeps listening too"
+    monkeypatch.setenv("WAKE_ENGINE_ONLY", "1")
+    assert w.engine_trusted() is True
+    monkeypatch.delenv("WAKE_ENGINE_ONLY")
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    assert w.engine_trusted() is True, "openWakeWord's own models are"

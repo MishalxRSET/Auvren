@@ -1,9 +1,10 @@
-# Optional: the openWakeWord audio engine. Needed only for a pretrained wake
-# word (WAKE_WORD=hey_jarvis) or a trained hey_auvren.onnx; "Hey Auvren" is
-# otherwise heard by speech recognition (requirements-stt.txt).
+# Optional: the openWakeWord audio engine, which runs the trained "Hey Auvren"
+# model in models/wakeword (or WAKE_WORD=hey_jarvis). It hears the wake word
+# even while Auvren is speaking, so it can cut him off; without it, "Hey
+# Auvren" is heard by speech recognition (requirements-stt.txt).
 #
 #   pip install -r requirements-wakeword.txt
-#   python wakeword.py --setup        # downloads the model files, lists mics
+#   python wakeword.py --setup        # downloads openWakeWord's feature models, lists mics
 #
 # Kept out of requirements.txt on purpose: openWakeWord pulls in onnxruntime,
 # scipy and scikit-learn, and on Linux tflite-runtime, which has no wheels

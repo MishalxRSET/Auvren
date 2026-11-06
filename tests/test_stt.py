@@ -476,6 +476,7 @@ def test_without_the_wake_engine_the_ears_transcribe_everything(server_local, mo
     monkeypatch.setattr(server, "wake_listener", None)
     assert server._ears_should_transcribe() is True, "the words ARE the wake word"
     monkeypatch.setattr(server, "wake_listener", SimpleNamespace(stop=lambda: None))
+    monkeypatch.setattr(server.wakeword, "engine_trusted", lambda: True)
     server.wake_gate.close()
     assert server._ears_should_transcribe() is False
     server.wake_gate.open()
@@ -501,3 +502,45 @@ def test_if_the_ears_will_not_start_the_browser_listens(monkeypatch, tmp_path):
         assert server.STT_MODE == "browser" and server.local_ears is None
         with c.websocket_connect("/ws/voice") as ws:
             assert ws.receive_json()["stt"] == "browser"
+
+
+def test_a_self_trained_engine_does_not_stop_the_transcript_wake(server_local, monkeypatch):
+    c, server, ears = server_local
+    monkeypatch.setattr(server.wake_gate, "enabled", True)
+    monkeypatch.setattr(server, "wake_listener", SimpleNamespace(stop=lambda: None))
+    server.wake_gate.close()
+    monkeypatch.setattr(server.wakeword, "engine_trusted", lambda: False)
+    assert server._ears_should_transcribe() is True, "it may miss your voice: Whisper backs it up"
+    monkeypatch.setattr(server.wakeword, "engine_trusted", lambda: True)
+    assert server._ears_should_transcribe() is False
+
+
+def test_saying_his_own_name_does_not_wake_him(server_local, monkeypatch):
+    c, server, ears = server_local
+    monkeypatch.setattr(server.wake_gate, "enabled", True)
+    monkeypatch.setattr(server, "voice_clients", {object()})       # no summon
+    server.wake_gate.close()
+    server._note_own_name("Auvren at your service, sir.")
+    c.portal.call(server._wake_up, "audio", 0.97)
+    assert not server.wake_gate.awake, "that was his own voice"
+    c.portal.call(server._wake_up, "transcript")
+    assert server.wake_gate.awake, "only the engine's wakes are suspect"
+    server.wake_gate.close()
+    monkeypatch.setattr(server, "_name_spoken_until", 0.0)
+    c.portal.call(server._wake_up, "audio", 0.97)
+    assert server.wake_gate.awake
+
+
+def test_real_synthesis_notes_his_own_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    import server
+    importlib.reload(server)
+
+    async def synth(text, **kw):
+        return SimpleNamespace(audio=b"x", first_byte_sec=0.0, total_sec=0.0)
+    monkeypatch.setattr(server.tts, "synthesize", synth)
+    monkeypatch.setattr(server.tts, "voice_problem", lambda: None)
+    asyncio.run(server._synth_for_speech("Nothing to see here."))
+    assert server._name_spoken_until == 0.0
+    asyncio.run(server._synth_for_speech("Auvren, at your service."))
+    assert server._name_spoken_until > time.monotonic() + 15

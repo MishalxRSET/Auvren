@@ -134,6 +134,24 @@ def models_dir() -> Path:
     return data_paths.data_dir() / "wakeword"
 
 
+# Models that ship with Auvren: the trained hey_auvren (scripts/train_wakeword.py).
+# A copy in the data folder (a retrained one, say) wins.
+BUNDLED_DIR = Path(__file__).parent / "models" / "wakeword"
+
+
+def engine_trusted() -> bool:
+    """Whether the audio engine alone may decide that Auvren was called.
+
+    openWakeWord's pretrained models, yes. Our own hey_auvren was trained on
+    synthetic voices only, so by default speech recognition keeps listening
+    for "Hey Auvren" too, and a model that misses your voice can never make
+    Auvren deaf. WAKE_ENGINE_ONLY=1 trusts it (and saves the CPU Whisper
+    spends on everything said in the room)."""
+    if (os.getenv("WAKE_ENGINE_ONLY") or "").strip().lower() in ("1", "true", "yes"):
+        return True
+    return wake_name() in PRETRAINED and not setting().lower().endswith(".onnx")
+
+
 def model_files() -> tuple[Path, Path, Path]:
     """(wake model, melspectrogram, embedding) — all ONNX, all local files."""
     d = models_dir()
@@ -142,8 +160,8 @@ def model_files() -> tuple[Path, Path, Path]:
         wake = Path(value)
     else:
         name = value.lower()
-        found = sorted(d.glob(f"{name}*.onnx"))
-        wake = found[0] if found else d / f"{name}_v0.1.onnx"
+        found = sorted(d.glob(f"{name}*.onnx")) or sorted(BUNDLED_DIR.glob(f"{name}*.onnx"))
+        wake = found[-1] if found else d / f"{name}_v0.1.onnx"
     return wake, d / "melspectrogram.onnx", d / "embedding_model.onnx"
 
 
