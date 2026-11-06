@@ -147,7 +147,7 @@ def stage_download(work: Path, acav_rows: int, acav_chunks: int) -> None:
     log("feature models and validation set")
 
     # A spread of slices across the whole 2,000 hours, not its first hours.
-    out = work / "acav_sample.npy"
+    out = _acav_path(work, acav_rows)
     if not out.exists():
         per = acav_rows // acav_chunks
         parts = []
@@ -155,7 +155,7 @@ def stage_download(work: Path, acav_rows: int, acav_chunks: int) -> None:
             start = int(i * (ACAV_ROWS - per) / max(1, acav_chunks - 1))
             lo = NPY_OFFSET + start * ROW_BYTES
             hi = lo + per * ROW_BYTES - 1
-            part = work / f"acav_{i:02d}.bin"
+            part = work / f"acav_{acav_rows}_{i:03d}.bin"
             fetch(f"{OWW_FEATURES}/{ACAV_FILE}", part, (lo, hi))
             parts.append(part)
             log(f"acav slice {i + 1}/{acav_chunks}")
@@ -167,6 +167,18 @@ def stage_download(work: Path, acav_rows: int, acav_chunks: int) -> None:
             part.unlink()
         arr.flush()
     log("acav sample ready")
+
+
+def _acav_path(work: Path, rows: int) -> Path:
+    return work / f"acav_{rows}.npy"
+
+
+def _acav(work: Path) -> np.ndarray:
+    """The largest ACAV sample downloaded."""
+    found = sorted(work.glob("acav_*.npy"), key=lambda p: p.stat().st_size)
+    if not found:
+        raise SystemExit("no ACAV sample: run the download stage")
+    return np.load(found[-1], mmap_mode="r")
 
 
 # --- synthesis ------------------------------------------------------------------------------
@@ -472,51 +484,93 @@ class MLP:
 
 
 def _flat(x):
-    return x.reshape(len(x), -1).astype(np.float32)
+    return np.asarray(x, dtype=np.float32).reshape(len(x), -1)
 
 
-def stage_train(work: Path, out: Path, epochs: int) -> None:
+def _logit(p: float) -> float:
+    return math.log(p / (1 - p))
+
+
+def stage_train(work: Path, out: Path, steps: int, max_neg_weight: float,
+                target_fph: float) -> None:
+    """openWakeWord's recipe, in numpy.
+
+    Every batch has the same make-up whatever the dataset sizes -- 256
+    positives, 256 near-misses, 128 sentences, 1,280 ACAV windows and up to
+    128 of the hardest negatives found so far -- and the negatives' weight
+    ramps from 1 to `max_neg_weight` over training. A model trained the other
+    way round (positives weighted ~17x, 128 hours of negatives) recognised
+    97% of held-out voices and woke 83 times an hour on the validation
+    stream. The threshold is then chosen on the FIRST half of that stream
+    for `target_fph` false wakes an hour, and folded into the output bias,
+    so 0.5 -- the runtime default -- is the calibrated point.
+    """
     f = np.load(work / "features.npz")
-    acav = np.load(work / "acav_sample.npy", mmap_mode="r")
-    n_acav_test = len(acav) // 10
-    X_parts = [f["train_pos"], f["train_adv"], f["train_gen"], acav[n_acav_test:]]
-    y = np.concatenate([np.ones(len(f["train_pos"])), np.zeros(len(f["train_adv"])),
-                        np.zeros(len(f["train_gen"])), np.zeros(len(acav) - n_acav_test)]
-                       ).astype(np.float32)
-    kind = np.concatenate([np.full(len(f["train_pos"]), 0), np.full(len(f["train_adv"]), 1),
-                           np.full(len(f["train_gen"]), 2), np.full(len(acav) - n_acav_test, 3)])
-    X = np.concatenate([_flat(p) for p in X_parts])
-    mu = X[::7].mean(0)
-    sd = X[::7].std(0) + 1e-3
-    X = (X - mu) / sd
-    n_pos, n_neg = int(y.sum()), int((1 - y).sum())
-    base_w = np.where(y == 1, 0.5 * n_neg / n_pos, 1.0).astype(np.float32)
-    base_w[kind == 1] *= 4.0            # the near-misses matter most
-    log(f"train: {n_pos} positive windows, {n_neg} negative ({len(acav) - n_acav_test} from ACAV)")
+    acav = _acav(work)
+    n_test = len(acav) // 10
+    acav_train = np.arange(n_test, len(acav))
+    pos, adv, gen = f["train_pos"], f["train_adv"], f["train_gen"]
+    sample = np.concatenate([_flat(pos[:4000]), _flat(adv[:3000]), _flat(gen[:2000]),
+                             _flat(acav[n_test:n_test + 20000])])
+    mu = sample.mean(0)
+    sd = sample.std(0) + 1e-3
+    norm = lambda x: (_flat(x) - mu) / sd                            # noqa: E731
+    log(f"train: {len(pos)} positives, {len(adv)} near-misses, {len(gen)} sentences, "
+        f"{len(acav_train)} ACAV windows; {steps} steps, negative weight to {max_neg_weight}")
 
     net = MLP()
     rng = np.random.default_rng(0)
-    w = base_w.copy()
-    for rnd in range(2):
-        for ep in range(epochs):
-            lr = 1e-3 * (0.5 ** (ep / max(1, epochs // 3)))
-            order = rng.permutation(len(X))
-            for i in range(0, len(order), 1024):
-                idx = order[i:i + 1024]
-                net.step(X[idx], y[idx], w[idx], lr)
-            p = net.predict(X[::17])
-            log(f"round {rnd + 1} epoch {ep + 1}: mean score pos {p[y[::17] == 1].mean():.3f} "
-                f"neg {p[y[::17] == 0].mean():.4f}")
-        if rnd == 0:
-            # Round two: the negatives it scored highest are where it is wrong.
-            p = net.predict(X)
-            hard = (y == 0) & (p > 0.1)
-            w = base_w.copy()
-            w[hard] *= 1 + 9 * np.minimum(p[hard], 1.0)
-            log(f"hard negatives reweighted: {int(hard.sum())}")
+    hard = np.empty((0, FRAMES, EMBED), np.float16)
+    mine_every = max(1, steps // 5)
+    t0 = time.time()
+    for step in range(steps):
+        frac = step / steps
+        neg_w = 1 + (max_neg_weight - 1) * frac
+        lr = 1e-3 * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * frac)))
+        parts = [pos[rng.integers(len(pos), size=256)], adv[rng.integers(len(adv), size=256)],
+                 gen[rng.integers(len(gen), size=128)],
+                 acav[np.sort(rng.choice(acav_train, 1280, replace=False))]]
+        if len(hard):
+            parts.append(hard[rng.integers(len(hard), size=min(128, len(hard)))])
+        X = norm(np.concatenate(parts))
+        y = np.zeros(len(X), np.float32)
+        y[:256] = 1
+        w = np.full(len(X), neg_w, np.float32)
+        w[:256] = 1.0
+        w[256:512] *= 2.0                     # near-misses count double
+        net.step(X, y, w, lr)
+        if (step + 1) % mine_every == 0 and step + 1 < steps:
+            scores = np.concatenate([net.predict(norm(acav[i:i + 50000]))
+                                     for i in range(n_test, len(acav), 50000)])
+            worst = np.argsort(scores)[::-1][:20000]
+            worst = worst[scores[worst] > 0.02]
+            hard = np.asarray(acav[np.sort(worst + n_test)]) if len(worst) else hard
+            p_pos = net.predict(norm(f["test_pos"]))
+            log(f"step {step + 1}: held-out recall@0.5 {float((p_pos >= 0.5).mean()):.3f}, "
+                f"ACAV windows >0.5: {int((scores > 0.5).sum())}, hard pool {len(hard)}, "
+                f"{time.time() - t0:.0f}s")
+
+    # Calibrate on the first half of the validation stream.
+    tmp = work / "uncalibrated.onnx"
+    _export(net, mu, sd, tmp)
+    val = np.load(work / "validation_set_features.npy", mmap_mode="r")
+    half = len(val) // 2
+    p_val = _stream_scores(tmp, val[:half])
+    hours = half * 0.08 / 3600
+    p_pos = _score(tmp, f["test_pos"])
+    chosen = 0.99
+    for t in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.93, 0.95, 0.97, 0.98, 0.99):
+        fph = _activations(p_val, t) / hours
+        log(f"threshold {t}: {fph:.2f} false wakes/hour (calibration half), "
+            f"held-out recall {float((p_pos >= t).mean()):.3f}")
+        if fph <= target_fph:
+            chosen = t
+            break
+    net.b[-1] -= _logit(chosen)               # score >= 0.5  <=>  old score >= chosen
     _export(net, mu, sd, out)
-    np.savez(work / "norm.npz", mu=mu, sd=sd)
-    log(f"wrote {out}")
+    tmp.unlink(missing_ok=True)
+    (work / "calibration.json").write_text(json.dumps({"threshold": chosen}))
+    log(f"calibrated at {chosen} (now 0.5); wrote {out}")
 
 
 def _export(net: MLP, mu, sd, out: Path) -> None:
@@ -612,16 +666,19 @@ def _runtime_check(work: Path, model_path: Path, t: float = 0.5, n: int = 60) ->
             wakes.append(k + 1280)
             last = k
             m.reset()
-    hits = sum(any(0 <= w - e <= int(1.5 * SR) for w in wakes) for e in ends)
-    false = sum(not any(0 <= w - e <= int(1.5 * SR) for e in ends) for w in wakes)
+    # A detection can land a frame BEFORE the trimmed clip's last sample.
+    near = lambda w, e: -int(0.5 * SR) <= w - e <= int(1.5 * SR)       # noqa: E731
+    hits = sum(any(near(w, e) for w in wakes) for e in ends)
+    false = sum(not any(near(w, e) for e in ends) for w in wakes)
     return {"threshold": t, "phrases": len(ends), "heard": hits,
             "false_wakes": false, "stream_minutes": round(pcm.size / SR / 60, 1)}
 
 
 def stage_eval(work: Path, model_path: Path, procs: int) -> dict:
     f = np.load(work / "features.npz")
-    acav = np.load(work / "acav_sample.npy", mmap_mode="r")
+    acav = _acav(work)
     val = np.load(work / "validation_set_features.npy", mmap_mode="r")
+    val = val[len(val) // 2:]          # the half the threshold was NOT chosen on
     report = {}
     p_pos = _score(model_path, f["test_pos"])
     p_adv = _score(model_path, f["test_adv"])
@@ -635,7 +692,7 @@ def stage_eval(work: Path, model_path: Path, procs: int) -> dict:
             "near_miss_false_wakes": round(float((p_adv >= t).mean()), 4),
             "sentence_false_wakes": round(float((p_gen >= t).mean()), 4),
             "acav_false_wakes_per_hour": round(float((p_acav >= t).sum() / (len(p_acav) * 1.28 / 3600)), 2),
-            "validation_false_wakes_per_hour": round(_activations(p_val, t) / hours_val, 2),
+            "validation_false_wakes_per_hour_heldout_half": round(_activations(p_val, t) / hours_val, 2),
         }
         if "test_mine" in f:
             report[str(t)]["recall_your_voice"] = round(float((_score(model_path, f["test_mine"]) >= t).mean()), 3)
@@ -657,9 +714,12 @@ def main() -> None:
     ap.add_argument("--n-adv", type=int, default=5000)
     ap.add_argument("--n-gen", type=int, default=3000)
     ap.add_argument("--aug", type=int, default=2, help="augmented copies of each training clip")
-    ap.add_argument("--epochs", type=int, default=8)
-    ap.add_argument("--acav-rows", type=int, default=400_000)
-    ap.add_argument("--acav-chunks", type=int, default=20)
+    ap.add_argument("--steps", type=int, default=20000)
+    ap.add_argument("--max-neg-weight", type=float, default=100.0)
+    ap.add_argument("--target-fph", type=float, default=0.5,
+                    help="false wakes per hour to calibrate the threshold for")
+    ap.add_argument("--acav-rows", type=int, default=1_200_000)
+    ap.add_argument("--acav-chunks", type=int, default=60)
     ap.add_argument("--my-recordings", type=Path, default=None)
     a = ap.parse_args()
     a.work.mkdir(parents=True, exist_ok=True)
@@ -673,7 +733,7 @@ def main() -> None:
         elif s == "features":
             stage_features(a.work, a.aug, a.procs, a.my_recordings)
         elif s == "train":
-            stage_train(a.work, a.out, a.epochs)
+            stage_train(a.work, a.out, a.steps, a.max_neg_weight, a.target_fph)
         elif s == "eval":
             stage_eval(a.work, a.out, a.procs)
 
