@@ -659,7 +659,7 @@ async def _wake_sleep_check() -> None:
 
 
 async def _wake_up(source: str, score: Optional[float] = None,
-                   was_awake: Optional[bool] = None) -> None:
+                   was_awake: Optional[bool] = None, summon: bool = True) -> None:
     """The wake word was heard — by the engine ("audio") or in a transcript.
 
     `was_awake` is passed by callers whose gate call has ALREADY opened the
@@ -678,6 +678,8 @@ async def _wake_up(source: str, score: Optional[float] = None,
     if not was_awake or source == "audio":
         await _voice_emit({**_wake_frame(), "cue": True})
     _schedule_wake_sleep()
+    if summon and not voice_clients and _summon_enabled():
+        await _summon_app()
 
 
 def _start_wake_listener(stream_factory=None) -> None:
@@ -710,6 +712,93 @@ def _stop_wake_listener() -> None:
     listener, wake_listener = wake_listener, None
     if listener is not None:
         listener.stop()
+
+
+# --- being summoned: the wake word with no window open ---------------------
+#
+# The server can listen with no page open (on-device recognition, or the wake
+# engine). When the wake word arrives and nobody is connected, it opens
+# Auvren's own window (actions.open_app_window), holds the listening window
+# open while that loads, and once the page has played its intro and says
+# `hello`, asks "Yes, sir?" — or, if the request came in the same breath as
+# the wake word ("Hey Auvren, what time is it?"), answers it.
+
+SUMMON_HOLD_SEC = 45.0          # how long a summon waits for its window
+SUMMON_DEBOUNCE_SEC = 20.0      # one window per wake, however often it is said
+SUMMON_HELLO_GRACE_SEC = 8.0    # a page that never says hello is asked anyway
+_summon: dict = {"pending_until": 0.0, "last": -float("inf"), "request": None}
+
+
+def _summon_enabled() -> bool:
+    return (os.getenv("AUVREN_SUMMON") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _app_url() -> str:
+    """Where Auvren's window loads: AUVREN_APP_URL, else this server when it
+    serves the built page, else the Vite dev server."""
+    base = (os.getenv("AUVREN_APP_URL") or "").strip()
+    if not base:
+        if FRONTEND_DIST.exists():
+            scheme = os.getenv("JARVIS_SCHEME") or "https"
+            port = os.getenv("JARVIS_PORT") or "8340"
+            base = f"{scheme}://127.0.0.1:{port}/"
+        else:
+            base = "http://localhost:5173/"
+    return base + ("&" if "?" in base else "?") + "summoned=1"
+
+
+def _summon_pending() -> bool:
+    return time.monotonic() < _summon["pending_until"]
+
+
+async def _summon_app(request: Optional[str] = None) -> bool:
+    """Open Auvren's window (once per SUMMON_DEBOUNCE_SEC), and keep the
+    request — if there was one — for when it is up."""
+    now = time.monotonic()
+    if request:
+        _summon["request"] = request
+    _summon["pending_until"] = now + SUMMON_HOLD_SEC
+    wake_gate.open(SUMMON_HOLD_SEC)
+    _schedule_wake_sleep()
+    if now - _summon["last"] < SUMMON_DEBOUNCE_SEC:
+        return True                     # already on its way
+    _summon["last"] = now
+    url = _app_url()
+    result = await actions.open_app_window(url, str(data_paths.data_dir() / "app-window"))
+    if result.get("success"):
+        log.info("summoned: opened %s", url)
+        return True
+    log.warning("summoned, but the window would not open: %s", result.get("confirmation"))
+    _summon["pending_until"] = 0.0
+    _summon["request"] = None
+    _summon["last"] = -float("inf")       # the next wake word tries again
+    try:
+        if notifier.available():
+            await notifier.notify("Auvren", "I heard you, but my window wouldn't open.")
+    except Exception as e:
+        log.warning(f"summon notice failed: {e}")
+    return False
+
+
+async def _answer_summon() -> None:
+    """The summoned window is up: ask, or answer what was already asked."""
+    if not _summon_pending() or speech is None:
+        return
+    request = _summon["request"]
+    _summon["pending_until"] = 0.0
+    _summon["request"] = None
+    if request:
+        log.info(f"User (summoned): {request}")
+        _spawn(_handle_utterance(request))
+    else:
+        honorific = (os.getenv("HONORIFIC") or "sir").strip() or "sir"
+        await speech.say(f"Yes, {honorific}?", Priority.NORMAL)
+
+
+async def _answer_summon_later(delay: float) -> None:
+    """For a page that never says hello (an old build): ask anyway."""
+    await asyncio.sleep(delay)
+    await _answer_summon()
 
 
 # --- on-device speech recognition (stt.py) --------------------------------
@@ -6856,7 +6945,9 @@ async def _on_final_transcript(text: str, source: str = "browser") -> None:
         return
     if request != text:
         log.info(f"User (wake word): {text}")
-        await _wake_up("transcript", was_awake=was_awake)
+        # Not summoned from here: if a window is needed, it is opened once,
+        # below, carrying the request.
+        await _wake_up("transcript", was_awake=was_awake, summon=False)
     text = request
     verdict = await speech.user_final(text)
     if verdict == "replay":
@@ -6878,6 +6969,11 @@ async def _on_final_transcript(text: str, source: str = "browser") -> None:
         log.info(f"User ({verdict}, ignored, {ago}): {text}")
         return
     log.info(f"User{' (on-device)' if source == 'local' else ''}: {text}")
+    if not voice_clients and _summon_enabled():
+        # Heard on the laptop with no window open: open one, and answer
+        # this once it is up rather than into an empty room.
+        await _summon_app(request=text)
+        return
     if _is_fresh_start(text):
         _spawn(_start_fresh())
         return
@@ -6895,6 +6991,8 @@ async def voice_handler(ws: WebSocket):
         {"type": "played", "utt": 3, "idx": 1}      one audio chunk finished playing
         {"type": "mute", "muted": true}              the mute button (also stops the
                                                      on-device ears and wake engine)
+        {"type": "hello", "summoned": true}          a window the wake word opened has
+                                                     played its intro: ask, or answer
 
     Server -> Client:
         {"type": "config", "muteMicDuringSpeech": false}
@@ -6925,7 +7023,11 @@ async def voice_handler(ws: WebSocket):
         _enqueue(queue, {"type": "status", "state": "idle"})
 
         global _last_greeting_time
-        if speech is not None and time.time() - _last_greeting_time > 60:
+        if _summon_pending():
+            # The wake word opened this window: it asks once its intro has
+            # played (`hello`), not with a greeting now.
+            _spawn(_answer_summon_later(SUMMON_HELLO_GRACE_SEC))
+        elif speech is not None and time.time() - _last_greeting_time > 60:
             _last_greeting_time = time.time()
             await speech.say(_greeting(), Priority.NORMAL)
 
@@ -6962,6 +7064,9 @@ async def voice_handler(ws: WebSocket):
                 continue
             if kind == "mute":
                 _set_mic_muted(bool(msg.get("muted")))
+                continue
+            if kind == "hello":
+                await _answer_summon()
                 continue
             if kind == "interim":
                 # Logged because its ABSENCE is the diagnosis. A session that
@@ -7270,6 +7375,25 @@ if FRONTEND_DIST.exists():
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _start_background_logging() -> None:
+    """pythonw has no console: sys.stdout and sys.stderr are None. Send
+    everything — our log, uvicorn's, stray prints — to a rotating file."""
+    from logging.handlers import RotatingFileHandler
+    log_dir = data_paths.data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_dir / "auvren.log", maxBytes=2_000_000,
+                                  backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    stream = open(log_dir / "auvren.out", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 # Loopback, not `0.0.0.0`.
 #
 # Everything on this surface acts with the user's full authority: /api/runs
@@ -7293,12 +7417,23 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8340, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on changes")
     parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem")
+    parser.add_argument("--background", action="store_true",
+                        help="Run with no console (pythonw): serve the built page over "
+                             "plain HTTP on loopback, log to <data>/logs/auvren.log")
     args = parser.parse_args()
 
-    # Auto-detect SSL certs
+    if args.background:
+        _start_background_logging()
+
+    # Auto-detect SSL certs. Not in the background: the page is served by
+    # this server itself there, over loopback HTTP — a secure context already
+    # — so the window it opens on the wake word shows no certificate warning.
     cert_file = Path(__file__).parent / "cert.pem"
     key_file = Path(__file__).parent / "key.pem"
-    use_ssl = args.ssl or (cert_file.exists() and key_file.exists())
+    use_ssl = not args.background and (args.ssl or (cert_file.exists() and key_file.exists()))
+    if args.background and not FRONTEND_DIST.exists():
+        log.warning("--background with no frontend/dist: run `npm run build` in frontend, "
+                    "or the summoned window has nothing to show")
 
     proto = "https" if use_ssl else "http"
     ws_proto = "wss" if use_ssl else "ws"
@@ -7340,5 +7475,8 @@ if __name__ == "__main__":
         port=args.port,
         reload=reload,
         log_level="info",
+        # In the background there is no console: uvicorn's own handlers
+        # would write to a stream that does not exist.
+        **({"log_config": None} if args.background else {}),
         **ssl_kwargs,
     )

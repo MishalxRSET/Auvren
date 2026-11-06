@@ -114,6 +114,16 @@ this presents as "the UI is up but nothing works" rather than as an error.
   kept out of requirements.txt because it pulls onnxruntime/scipy/sklearn
   (and tflite on Linux). Without it, a transcript that opens with the wake
   phrase still wakes him. The browser gets `wake` frames for the orb
+- **Background / summon**: `server.py --background` (run by
+  `scripts/install_autostart.ps1` as `pythonw` at sign-in) serves the built
+  page over loopback HTTP and logs to `<data>/logs/`. When the wake word (or
+  a request) is heard with NO voice client connected, `_summon_app` opens
+  Auvren's own window (`actions.open_app_window`: Chrome, else Edge,
+  `--app=` on a profile in `<data>/app-window` so
+  `--autoplay-policy=no-user-gesture-required` takes effect; loopback URLs
+  only), holds the gate open, and keeps a same-breath request. The page
+  plays its intro (`frontend/src/intro.ts`, `?summoned=1`) and sends
+  `hello`; `_answer_summon` then says "Yes, sir?" or answers the request
 - **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
   on stdin, WAV out); Fish Audio optional (`tts.py`)
 - **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
@@ -168,6 +178,8 @@ arbitrary LLM and file content, so everything goes through
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
 - `mic.py` — `MicHub`: one microphone capture, fanned out to every listener
+- `frontend/src/intro.ts` — The intro over the orb; longer when summoned
+- `scripts/install_autostart.ps1` — Background start at Windows sign-in
 - `stt.py` — On-device speech recognition: `EnergyVAD`, `Segmenter`,
   `Transcriber` (faster-whisper), `LocalEars`, `python stt.py --setup`
 - `wakeword.py` — The wake word: `WakeGate` (pure window/hold/follow-up
@@ -263,6 +275,9 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   `STT_VAD_MIN_RMS` (400), `STT_BEAM_SIZE` (1), `STT_THREADS`,
   `STT_LANGUAGE` (`en`), `MIC_DEVICE` (index or name; `WAKE_DEVICE` is the
   older spelling)
+- `AUVREN_SUMMON` (default on; `0` never opens a window on the wake word),
+  `AUVREN_APP_URL` (where that window points; default this server's built
+  page, else the Vite dev server)
 - `WAKE_WORD` (default `hey_auvren`; `off` disables; `hey_jarvis`; or a path to a custom
   `.onnx`), `WAKE_THRESHOLD` (0.5), `WAKE_WINDOW_SEC` (8),
   `WAKE_FOLLOW_UP_SEC` (8), `WAKE_DEVICE` (mic index or name). The suite

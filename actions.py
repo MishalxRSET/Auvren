@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import winplat
 
@@ -129,6 +130,9 @@ async def open_terminal(cwd: str | None = None, command: str | None = None) -> d
 _BROWSER_EXES = {
     "chrome": (r"Google\Chrome\Application\chrome.exe", "Chrome"),
     "firefox": (r"Mozilla Firefox\firefox.exe", "Firefox"),
+    # Ships with every Windows 10/11, and takes Chrome's flags: the app
+    # window's fallback.
+    "edge": (r"Microsoft\Edge\Application\msedge.exe", "Edge"),
 }
 
 # A URL becomes ONE argv entry of chrome.exe/firefox.exe. Both treat an entry
@@ -174,6 +178,54 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
 
 async def open_chrome(url: str) -> dict:
     return await open_browser(url, "chrome")
+
+
+# --- Auvren's own window ---------------------------------------------------
+#
+# When the wake word is heard and no page is open, the server opens one: a
+# Chromium "app" window (no tabs, no address bar) on its own profile under
+# the data folder. Its own profile is not a nicety: Chromium's command-line
+# switches only take effect when they START a browser process, and a second
+# profile is a second process even while the user's Chrome is open. That is
+# what makes `--autoplay-policy=no-user-gesture-required` stick, so Auvren can
+# ask "Yes, sir?" in a window nobody has clicked yet.
+#
+# The URL is built by the server, never by the model, and is still checked
+# here: http(s) on a loopback host, or nothing is launched.
+
+_APP_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def app_window_argv(url: str, profile_dir: str) -> list[str] | None:
+    """The argv that opens `url` as Auvren's app window, or None."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or (parts.hostname or "") not in _APP_HOSTS:
+        return None
+    if any(c in url for c in "\r\n\x00 \""):
+        return None
+    exe = browser_exe("chrome") or browser_exe("edge")
+    if exe is None:
+        return None
+    return [exe, f"--app={url}", f"--user-data-dir={profile_dir}",
+            "--autoplay-policy=no-user-gesture-required",
+            "--no-first-run", "--no-default-browser-check", "--window-size=520,720"]
+
+
+async def open_app_window(url: str, profile_dir: str) -> dict:
+    """Open Auvren's own window. {"success": bool, "confirmation": str}."""
+    argv = app_window_argv(url, profile_dir)
+    if argv is None:
+        return {"success": False,
+                "confirmation": "I couldn't find Chrome or Edge to open my window in, sir."}
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    ok, err = await _spawn(argv)
+    if not ok:
+        log.error(f"open_app_window failed: {err}")
+    return {"success": ok,
+            "confirmation": "Here I am, sir." if ok else "My window wouldn't open, sir."}
 
 
 # --- Opening code where the user actually reads it ---------------------------

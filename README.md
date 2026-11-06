@@ -208,6 +208,22 @@ Chrome's recogniser). A raw microphone has no echo cancellation, so while
 Auvren is speaking he stops listening; say "Hey Auvren" or press Esc to cut
 him off (with headphones, `STT_LISTEN_WHILE_SPEAKING=1`).
 
+**In the background.** Auvren can run with no window open and still hear
+"Hey Auvren": when he does, he opens his own window — an intro plays — and
+asks what you want, or answers what you said in the same breath ("Hey
+Auvren, what time is it?"). To have him start with Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1
+```
+
+It builds the page once, adds `pythonw server.py --background` to your
+Startup folder (no console; logs in `data\logs\auvren.log`) and starts it.
+`-Remove` undoes it. It needs on-device speech recognition (above): with no
+page open, Chrome's recogniser has nobody to listen for. The window is Chrome
+— or Edge, which every Windows has — on a profile of its own, so it may speak
+before you have clicked anything.
+
 **The wake word.** Auvren is asleep until you say **"Hey Auvren"** (OV-ren) —
 the orb dims and the page says what to say. He then listens for one request,
 stays awake while he answers, and for a few seconds after, so you can reply
