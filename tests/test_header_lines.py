@@ -401,6 +401,12 @@ EXEMPT = {
         "read back, it goes to the server's gate and is refused — and every "
         "value goes through `_spoken` (one line, bounded) first. Driven in "
         "tests/test_local_brain.py"),
+    "tray.set_state": (
+        "the `.title` it sets is the tray tooltip, built by `tray.tooltip` from "
+        "fixed strings, the user's own wake-phrase setting and a reason from "
+        "server._BRAIN_DOWN_SHORT, a fixed table; no session field reaches it"),
+    "tray.start": (
+        "the same tooltip as `tray.set_state`, for the icon's first paint"),
     "wakeword.spoken_phrase": (
         "the `.title` it reads is `str.title()` on the user's own WAKE_WORD "
         "setting (a model name or the file name of his .onnx) — his "

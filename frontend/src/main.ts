@@ -272,6 +272,9 @@ socket.onMessage((msg) => {
     maybeHello();
   } else if (type === "stt") {
     setSttMode(msg.mode);
+  } else if (type === "mute") {
+    // From the tray, or another open tab: follow it, without echoing back.
+    setMuted(Boolean(msg.muted), false);
   } else if (type === "wake") {
     applyWake(msg, Boolean(msg.cue));
   } else if (type === "audio") {
@@ -341,12 +344,12 @@ const menuDropdown = document.getElementById("menu-dropdown")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
 
-btnMute.addEventListener("click", (e) => {
-  e.stopPropagation();
-  isMuted = !isMuted;
+function setMuted(muted: boolean, tellServer: boolean) {
+  if (muted === isMuted && !tellServer) return;
+  isMuted = muted;
   btnMute.classList.toggle("muted", isMuted);
   // The server's own microphone (on-device ears, wake engine) mutes too.
-  socket.send({ type: "mute", muted: isMuted });
+  if (tellServer) socket.send({ type: "mute", muted: isMuted });
   if (isMuted) {
     voiceInput.pause();
     transition("idle");
@@ -354,6 +357,11 @@ btnMute.addEventListener("click", (e) => {
     voiceInput.resume();
     transition(restingState());
   }
+}
+
+btnMute.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setMuted(!isMuted, true);
 });
 
 btnMenu.addEventListener("click", (e) => {

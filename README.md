@@ -217,7 +217,20 @@ Auvren, what time is it?"). To have him start with Windows:
 powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1
 ```
 
-It builds the page once, adds `pythonw server.py --background` to your
+Install the tray icon too — while no window is open it is the only sign he
+is running:
+
+```powershell
+pip install -r requirements-tray.txt
+```
+
+It shows his state at a glance (dim ring asleep, bright listening, white
+core thinking or speaking, struck through muted, red when something is down
+— the tooltip says what), and its menu has Open Auvren (or double-click),
+Dashboard, Listen now, Mute microphone, Start with Windows, Show log and
+Quit.
+
+The script builds the page once, adds `pythonw server.py --background` to your
 Startup folder (no console; logs in `data\logs\auvren.log`) and starts it.
 `-Remove` undoes it. It needs on-device speech recognition (above): with no
 page open, Chrome's recogniser has nobody to listen for. The window is Chrome

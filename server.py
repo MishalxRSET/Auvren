@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import signal
 import difflib
 import re
 import secrets
@@ -89,6 +90,7 @@ import local_brain
 from local_brain import LocalBrain, LocalBrainConfig
 import mic
 import stt
+import tray
 import wakeword
 from speech import Priority, SpeechScheduler
 
@@ -603,6 +605,11 @@ mic_hub: Optional[mic.MicHub] = None
 local_ears: Optional[stt.LocalEars] = None
 _mic_muted = False
 _auvren_speaking = False
+
+# The tray icon (tray.py), and what it shows.
+tray_icon: Optional[tray.Tray] = None
+_last_status_state = "idle"
+_brain_down: Optional[str] = None
 _WAKE_HOLDING_STATES = ("thinking", "speaking", "compacting")
 
 
@@ -618,20 +625,22 @@ def _wake_on_status(msg: dict) -> None:
 
     It is the on-device ears' cue too: they stop listening while he speaks
     (a raw microphone has no echo cancellation; see stt.py)."""
-    global _auvren_speaking
+    global _auvren_speaking, _last_status_state
     if msg.get("type") != "status":
         return
     state = msg.get("state")
     if state in ("speaking", "idle", "thinking"):
         _auvren_speaking = state == "speaking"
         _apply_ears_pause()
-    if not wake_gate.enabled:
-        return
-    if state in _WAKE_HOLDING_STATES:
-        wake_gate.hold()
-    elif state == "idle":
-        wake_gate.release()
-        _schedule_wake_sleep()
+    if isinstance(state, str):
+        _last_status_state = state
+    if wake_gate.enabled:
+        if state in _WAKE_HOLDING_STATES:
+            wake_gate.hold()
+        elif state == "idle":
+            wake_gate.release()
+            _schedule_wake_sleep()
+    _tray_refresh()
 
 
 def _schedule_wake_sleep() -> None:
@@ -656,6 +665,7 @@ async def _wake_sleep_check() -> None:
         return
     log.info("wake: asleep")
     await _voice_emit(_wake_frame())
+    _tray_refresh()
 
 
 async def _wake_up(source: str, score: Optional[float] = None,
@@ -678,6 +688,7 @@ async def _wake_up(source: str, score: Optional[float] = None,
     if not was_awake or source == "audio":
         await _voice_emit({**_wake_frame(), "cue": True})
     _schedule_wake_sleep()
+    _tray_refresh()
     if summon and not voice_clients and _summon_enabled():
         await _summon_app()
 
@@ -733,18 +744,30 @@ def _summon_enabled() -> bool:
     return (os.getenv("AUVREN_SUMMON") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _app_url() -> str:
+def _app_base() -> str:
     """Where Auvren's window loads: AUVREN_APP_URL, else this server when it
     serves the built page, else the Vite dev server."""
     base = (os.getenv("AUVREN_APP_URL") or "").strip()
-    if not base:
-        if FRONTEND_DIST.exists():
-            scheme = os.getenv("JARVIS_SCHEME") or "https"
-            port = os.getenv("JARVIS_PORT") or "8340"
-            base = f"{scheme}://127.0.0.1:{port}/"
-        else:
-            base = "http://localhost:5173/"
+    if base:
+        return base
+    if FRONTEND_DIST.exists():
+        scheme = os.getenv("JARVIS_SCHEME") or "https"
+        port = os.getenv("JARVIS_PORT") or "8340"
+        return f"{scheme}://127.0.0.1:{port}/"
+    return "http://localhost:5173/"
+
+
+def _app_url() -> str:
+    """The page, opened BY the wake word: it plays the long intro and asks."""
+    base = _app_base()
     return base + ("&" if "?" in base else "?") + "summoned=1"
+
+
+def _dashboard_url() -> str:
+    base = _app_base()
+    # This server serves the dashboard at /dashboard; Vite at /dashboard.html.
+    page = "dashboard.html" if base.rstrip("/").endswith(":5173") else "dashboard"
+    return base.split("?", 1)[0].rstrip("/") + "/" + page
 
 
 def _summon_pending() -> bool:
@@ -801,6 +824,121 @@ async def _answer_summon_later(delay: float) -> None:
     await _answer_summon()
 
 
+# --- the tray icon (tray.py) ------------------------------------------------
+
+def _tray_state() -> tuple[str, str]:
+    if _brain_down:
+        return "down", _brain_down
+    if _mic_muted:
+        return "muted", ""
+    if _last_status_state in ("thinking", "compacting"):
+        return "thinking", ""
+    if _last_status_state == "speaking":
+        return "speaking", ""
+    if not wake_gate.enabled or wake_gate.awake:
+        return "awake", ""
+    return "asleep", ""
+
+
+def _tray_refresh() -> None:
+    if tray_icon is not None:
+        tray_icon.set_state(*_tray_state())
+
+
+def _app_profile() -> str:
+    return str(data_paths.data_dir() / "app-window")
+
+
+async def _tray_open() -> None:
+    result = await actions.open_app_window(_app_base(), _app_profile())
+    if not result.get("success") and tray_icon is not None:
+        tray_icon.notify(result.get("confirmation") or "My window wouldn't open.")
+
+
+async def _tray_dashboard() -> None:
+    result = await actions.open_app_window(_dashboard_url(), _app_profile())
+    if not result.get("success") and tray_icon is not None:
+        tray_icon.notify(result.get("confirmation") or "The dashboard wouldn't open.")
+
+
+async def _tray_listen() -> None:
+    """"Listen now": the wake word, from the menu."""
+    if not voice_clients:
+        await _summon_app()
+    elif wake_gate.enabled:
+        await _wake_up("tray", was_awake=False, summon=False)
+
+
+async def _tray_toggle_mute() -> None:
+    _set_mic_muted(not _mic_muted)
+    await _voice_emit({"type": "mute", "muted": _mic_muted})
+
+
+def _tray_toggle_autostart() -> None:
+    """On the tray's own thread: making a shortcut takes a moment, and
+    blocks nothing but the menu."""
+    ok, sentence = tray.set_autostart(not tray.autostart_enabled(), Path(__file__).parent)
+    if tray_icon is not None:
+        tray_icon.refresh_menu()
+        tray_icon.notify(sentence)
+
+
+async def _tray_show_log() -> None:
+    path = data_paths.data_dir() / "logs" / "auvren.log"
+    if not path.is_file():
+        if tray_icon is not None:
+            tray_icon.notify("No log yet: it is written while Auvren runs in the background.")
+        return
+    await actions.open_text_file(str(path))
+
+
+async def _tray_quit() -> None:
+    """Quit the way Ctrl+C does: uvicorn's own handler shuts the server down
+    cleanly — brain handover, speech, microphone and this icon included."""
+    log.info("quit from the tray")
+    signal.raise_signal(signal.SIGINT)
+
+
+def _start_tray() -> None:
+    """Show the tray icon, if wanted and installed. Never raises."""
+    global tray_icon
+    if tray_icon is not None or not tray.setting_enabled():
+        return
+    problem = tray.tray_problem()
+    if problem:
+        log.info("tray: off (%s)", problem)
+        return
+    loop = asyncio.get_running_loop()
+
+    def on_loop(fn):
+        return lambda: loop.call_soon_threadsafe(fn)
+
+    def spawn(coro_fn):
+        return lambda: loop.call_soon_threadsafe(lambda: _spawn(coro_fn()))
+
+    icon = tray.Tray(tray.TrayActions(
+        open=spawn(_tray_open), dashboard=spawn(_tray_dashboard), listen=spawn(_tray_listen),
+        toggle_mute=spawn(_tray_toggle_mute), toggle_autostart=_tray_toggle_autostart,
+        show_log=spawn(_tray_show_log), quit=spawn(_tray_quit),
+        is_muted=lambda: _mic_muted, is_autostart=tray.autostart_enabled),
+        phrase=wakeword.spoken_phrase())
+    icon.set_state(*_tray_state())
+    problem = icon.start()
+    if problem:
+        log.warning("tray: %s", problem)
+        return
+    tray_icon = icon
+    if os.getenv("AUVREN_BACKGROUND") == "1":
+        icon.notify(f"Running in the background. Say \u201c{wakeword.spoken_phrase()}\u201d.")
+
+
+def _stop_tray() -> None:
+    global tray_icon
+    icon, tray_icon = tray_icon, None
+    if icon is not None:
+        icon.stop()
+
+
 # --- on-device speech recognition (stt.py) --------------------------------
 
 def _apply_ears_pause() -> None:
@@ -815,6 +953,9 @@ def _set_mic_muted(muted: bool) -> None:
         log.info("microphone %s by the user", "muted" if muted else "unmuted")
     _mic_muted = muted
     _apply_ears_pause()
+    _tray_refresh()
+    if tray_icon is not None:
+        tray_icon.refresh_menu()
 
 
 def _ears_should_transcribe() -> bool:
@@ -1020,7 +1161,25 @@ def _brain_down_line(failure_reason, generic: str = "My language systems are dow
     return generic
 
 
+_BRAIN_DOWN_SHORT = {
+    "auth": "Claude Code is not logged in",
+    "ollama_down": "Ollama is not running",
+    "model_missing": "the local model is not downloaded",
+}
+
+
 async def _on_brain_state(state: str, info: dict) -> None:
+    global _brain_down
+    if state == "failed":
+        _brain_down = _BRAIN_DOWN_SHORT.get(info.get("failure_reason"), "the brain is down")
+        _tray_refresh()
+    elif state in ("ready", "rotated"):
+        _brain_down = None
+        _tray_refresh()
+    await _on_brain_state_spoken(state, info)
+
+
+async def _on_brain_state_spoken(state: str, info: dict) -> None:
     if state == "failed" and info.get("failure_reason") == "auth":
         # At ERROR level, visible in the terminal the user is already
         # looking at, regardless of whether speech itself is available.
@@ -1496,6 +1655,7 @@ async def stop_brain_and_speech() -> None:
         raise
     except Exception as e:
         log.warning(f"shutdown journal failed: {e}")
+    _stop_tray()
     _stop_local_audio()
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
@@ -2139,6 +2299,7 @@ async def lifespan(application: FastAPI):
 
     await start_brain_and_speech()
     await _start_local_audio()
+    _start_tray()
     await start_session_watcher()
     # Deliberately not awaited: every check is time-boxed to 5s, so running
     # them inline could hold the server closed for that long before the UI can
@@ -7004,6 +7165,7 @@ async def voice_handler(ws: WebSocket):
         {"type": "wake", "enabled": true, "awake": false, "phrase": "Hey Jarvis",
          "cue": true}                                the wake word opened (cue) or
                                                      the listening window closed
+        {"type": "mute", "muted": true}              muted from the tray or another tab
         {"type": "stt", "mode": "browser"}           who listens: "local" (stt.py, on
                                                      this machine) or "browser" (also
                                                      in `config`); the page runs Chrome's
@@ -7064,6 +7226,8 @@ async def voice_handler(ws: WebSocket):
                 continue
             if kind == "mute":
                 _set_mic_muted(bool(msg.get("muted")))
+                # Every other open page, and the tray, show the same.
+                await _voice_emit({"type": "mute", "muted": _mic_muted})
                 continue
             if kind == "hello":
                 await _answer_summon()
@@ -7424,6 +7588,7 @@ if __name__ == "__main__":
 
     if args.background:
         _start_background_logging()
+        os.environ["AUVREN_BACKGROUND"] = "1"
 
     # Auto-detect SSL certs. Not in the background: the page is served by
     # this server itself there, over loopback HTTP — a secure context already

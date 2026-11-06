@@ -69,6 +69,13 @@ if ($LASTEXITCODE -ne 0) {
                    "  pip install -r requirements-stt.txt`n  python stt.py --setup")
 }
 
+# --- the tray icon, the only sign of him while no window is open ---------------
+& $python -c "import tray, sys; sys.exit(0 if tray.tray_problem() is None else 1)" 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning ("The tray icon is not installed, so nothing will show that Auvren " +
+                   "is running. Run:`n  pip install -r requirements-tray.txt")
+}
+
 # --- the shortcut --------------------------------------------------------------
 $shell = New-Object -ComObject WScript.Shell
 $sc = $shell.CreateShortcut($link)

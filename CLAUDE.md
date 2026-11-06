@@ -124,6 +124,14 @@ this presents as "the UI is up but nothing works" rather than as an error.
   only), holds the gate open, and keeps a same-breath request. The page
   plays its intro (`frontend/src/intro.ts`, `?summoned=1`) and sends
   `hello`; `_answer_summon` then says "Yes, sir?" or answers the request
+- **Tray** (`tray.py`, Windows, optional `requirements-tray.txt`): pystray
+  on its own thread (`run_detached`), the icon painted in code with Pillow
+  per state (`server._tray_state`: down > muted > thinking/speaking > awake
+  > asleep), refreshed from the same status frames, wake events, mute and
+  brain-state callbacks. Menu actions run on the tray's thread and are
+  handed to the loop; Quit raises SIGINT so uvicorn shuts down cleanly.
+  "Start with Windows" writes the same Startup shortcut as
+  `install_autostart.ps1` (fixed PowerShell script, paths via env)
 - **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
   on stdin, WAV out); Fish Audio optional (`tts.py`)
 - **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
@@ -179,6 +187,7 @@ arbitrary LLM and file content, so everything goes through
   utterance JARVIS speaks
 - `mic.py` — `MicHub`: one microphone capture, fanned out to every listener
 - `frontend/src/intro.ts` — The intro over the orb; longer when summoned
+- `tray.py` — The tray icon: state icons, menu, Start-with-Windows shortcut
 - `scripts/install_autostart.ps1` — Background start at Windows sign-in
 - `stt.py` — On-device speech recognition: `EnergyVAD`, `Segmenter`,
   `Transcriber` (faster-whisper), `LocalEars`, `python stt.py --setup`
@@ -275,6 +284,7 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   `STT_VAD_MIN_RMS` (400), `STT_BEAM_SIZE` (1), `STT_THREADS`,
   `STT_LANGUAGE` (`en`), `MIC_DEVICE` (index or name; `WAKE_DEVICE` is the
   older spelling)
+- `AUVREN_TRAY` (default on where installed; the suite pins `0`)
 - `AUVREN_SUMMON` (default on; `0` never opens a window on the wake word),
   `AUVREN_APP_URL` (where that window points; default this server's built
   page, else the Vite dev server)

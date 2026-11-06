@@ -292,6 +292,15 @@ async def open_in_editor(path: str) -> dict:
     }
 
 
+async def open_text_file(path: str) -> dict:
+    """A plain text file (a log) in Notepad — never its file association,
+    and never an editor that would take it for a project."""
+    ok, err = await _spawn([winplat.system32_exe("notepad.exe"), str(path)])
+    if not ok:
+        log.error(f"open_text_file failed: {err}")
+    return {"success": ok, "confirmation": "Opened, sir." if ok else "Notepad wouldn't open, sir."}
+
+
 def _generate_project_name(prompt: str) -> str:
     """Generate a kebab-case project folder name from the prompt."""
     # First: check for a quoted name like "tiktok-analytics-dashboard"

@@ -32,6 +32,8 @@ def _no_wake_word_unless_asked(monkeypatch):
     # Likewise on-device speech recognition: a machine with faster-whisper
     # installed would otherwise open its real microphone under test.
     monkeypatch.setenv("STT_ENGINE", "browser")
+    # And no tray icon: tests of it build one against a fake pystray.
+    monkeypatch.setenv("AUVREN_TRAY", "0")
     import sys
     server = sys.modules.get("server")
     if server is not None and hasattr(server, "wake_gate"):
