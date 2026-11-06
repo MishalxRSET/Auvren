@@ -27,7 +27,10 @@ NOTHING here may open a real editor or read outside its tmp_path: `actions` is
 mocked at the module boundary and the recorder asserts what it was handed.
 """
 
+import contextlib
 import importlib
+import os
+import shutil
 import time
 from pathlib import Path
 
@@ -300,6 +303,148 @@ async def test_search_needs_something_to_look_for(ready, no_ripgrep):
     server, _fake, _project = ready
     out = await server.tool_search_repo({"project": "chitauri", "query": " "})
     assert out.rstrip().endswith("?")
+
+
+# --- the same question, the same answer -----------------------------------
+#
+# Only SEARCH_MAX_HITS lines are shown, so the ORDER hits arrive in decides
+# which files the brain sees at all. It used to be whatever order ripgrep's
+# threads finished files in: `test_self_source` failed about one full-suite
+# run in three because `brain.py` fell out of the eight lines shown.
+
+@pytest.fixture(params=["walk", "rg"])
+def tool(request, monkeypatch):
+    """Runs a test once per search path. Ripgrep is real here, not faked —
+    its own output order is the thing under test — so it skips without it."""
+    if request.param == "walk":
+        monkeypatch.setattr(repo_read, "_rg_path", lambda: None)
+    elif shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    return request.param
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("files", [
+    repo_read.SEARCH_MAX_HITS * 5,
+    # Past the count cap, WHICH hits got counted is the tool's own output
+    # order, so this is the case `--sort path` exists for.
+    repo_read.SEARCH_HIT_COUNT_CAP + 100,
+])
+async def test_the_same_search_shows_the_same_files_every_time(tmp_path, tool,
+                                                               files):
+    for n in range(files):
+        folder = tmp_path / f"d{n // 10:02}"
+        folder.mkdir(exist_ok=True)
+        (folder / f"f{n % 10}.py").write_text("x = 1\nneedle()\n")
+
+    first = await repo_read.search(tmp_path, "needle")
+    assert first.tool == tool, "or the other search path is what got tested"
+    assert first.found > repo_read.SEARCH_MAX_HITS
+    for _ in range(5):
+        again = await repo_read.search(tmp_path, "needle")
+        assert (again.found, again.capped, again.lines) == \
+            (first.found, first.capped, first.lines)
+    assert first.lines == [f"d00/f{n}.py:2: needle()"
+                           for n in range(repo_read.SEARCH_MAX_HITS)]
+
+
+@pytest.mark.asyncio
+async def test_the_walk_does_not_depend_on_the_order_the_disk_lists_files(
+        tmp_path, monkeypatch):
+    """`os.scandir` yields in the filesystem's own order — by name on APFS,
+    by hash on ext4 — so running twice on one disk proves nothing. Handing
+    the walk every directory backwards must change nothing."""
+    monkeypatch.setattr(repo_read, "_rg_path", lambda: None)
+    for folder in ("src", "src/deep", "lib"):
+        (tmp_path / folder).mkdir()
+        for n in range(4):
+            (tmp_path / folder / f"m{n}.py").write_text("needle\n")
+    (tmp_path / "top.py").write_text("needle\n")
+
+    as_listed = await repo_read.search(tmp_path, "needle")
+    files = repo_read.walk(tmp_path).files
+
+    listed_by_disk = os.scandir
+
+    @contextlib.contextmanager
+    def backwards(path):
+        with listed_by_disk(path) as entries:
+            yield list(entries)[::-1]
+
+    monkeypatch.setattr(os, "scandir", backwards)
+    assert (await repo_read.search(tmp_path, "needle")).lines == as_listed.lines
+    assert repo_read.walk(tmp_path).files == files
+    assert as_listed.found == 13 > repo_read.SEARCH_MAX_HITS
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_and_the_walk_show_the_same_lines(tmp_path, monkeypatch):
+    """Ripgrep is depth-first and the walk breadth-first, so their raw order
+    differs whenever a file sits above a folder. Which one happened to be
+    installed must not change what the brain is shown."""
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    for n in range(4):
+        (tmp_path / f"z{n}.py").write_text("needle\n")
+        (tmp_path / "a" / f"m{n}.py").write_text("needle\n")
+        (tmp_path / "a" / "b" / f"m{n}.py").write_text("x\nneedle\n")
+        (tmp_path / "tests" / f"test_{n}.py").write_text("needle\n")
+
+    by_rg = await repo_read.search(tmp_path, "needle")
+    monkeypatch.setattr(repo_read, "_rg_path", lambda: None)
+    by_walk = await repo_read.search(tmp_path, "needle")
+
+    assert (by_rg.tool, by_walk.tool) == ("rg", "walk")
+    assert by_rg.found == by_walk.found == 16
+    assert by_rg.lines == by_walk.lines
+    assert by_rg.lines[0] == "a/b/m0.py:2: needle"
+
+
+@pytest.mark.asyncio
+async def test_source_is_shown_before_tests(tmp_path, tool):
+    """Eight lines, and "where does X live" asks where it is defined. Here
+    the tests sort FIRST by name, so only the ranking puts the source on top
+    — and the count still says how many there were in all."""
+    (tmp_path / "__tests__").mkdir()
+    for n in range(repo_read.SEARCH_MAX_HITS):
+        (tmp_path / "__tests__" / f"t{n}.test.ts").write_text("LIMIT\n")
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "test_limit.py").write_text("LIMIT\n")
+    (tmp_path / "zz").mkdir()
+    (tmp_path / "zz" / "limits.py").write_text("x\nLIMIT = 3\n")
+
+    hits = await repo_read.search(tmp_path, "LIMIT")
+    assert hits.tool == tool
+    assert hits.found == repo_read.SEARCH_MAX_HITS + 2
+    assert hits.lines[0] == "zz/limits.py:2: LIMIT = 3"
+    assert hits.lines[1].startswith("__tests__/t0.test.ts:1:")
+
+
+@pytest.mark.parametrize("path, is_test", [
+    ("tests/helpers.py", True),
+    ("Tests/AppTests/LoginTests.swift", True),
+    ("src/__tests__/auth.ts", True),
+    ("pkg/test/fixture.json", True),
+    ("test_brain.py", True),
+    ("conftest.py", True),
+    ("app/tests.py", True),
+    ("pkg/server_test.go", True),
+    ("web/app.test.ts", True),
+    ("web/app.spec.tsx", True),
+    ("spec/user_spec.rb", True),
+    ("brain.py", False),
+    ("src/latest.py", False),
+    ("src/attest.py", False),
+    ("src/contest_entry.py", False),
+    ("testimonials/page.tsx", False),
+    # Library code and design documents, not tests.
+    ("numpy/testing/utils.py", False),
+    ("docs/superpowers/specs/2026-01-01-auth.md", False),
+])
+def test_what_counts_as_a_test(path, is_test):
+    assert repo_read._is_test(path) is is_test
 
 
 # --- 3. read_file ---------------------------------------------------------
