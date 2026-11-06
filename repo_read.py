@@ -32,6 +32,7 @@ Two rules govern every function:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 import re
 import shutil
@@ -466,32 +467,45 @@ def walk(root: Path, deadline: float | None = None) -> Walk:
         out.dirs += 1
         try:
             with os.scandir(directory) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            if depth + 1 > MAX_DEPTH:
-                                out.complete = False
-                                continue
-                            if _skip_dir(entry.name) or _is_private(entry.path):
-                                continue
-                            queue.append((Path(entry.path),
-                                          f"{prefix}{entry.name}/", depth + 1))
-                        elif entry.is_file(follow_symlinks=False):
-                            if _skip_file(entry.name) or _is_private(entry.path):
-                                continue
-                            # Checked HERE as well as at the top of the loop:
-                            # one directory holding a million files would
-                            # otherwise be scanned in full before anything
-                            # noticed the budget was gone.
-                            if len(out.files) >= MAX_FILES:
-                                out.complete = False
-                                break
-                            out.files.append(
-                                (f"{prefix}{entry.name}", entry.stat().st_size))
-                    except OSError:
-                        continue
+                # At most one walk's worth of entries, so one directory
+                # holding a million files is still a bounded read. Past
+                # that, which entries were read is the filesystem's choice,
+                # and the walk says it is incomplete.
+                listing = list(itertools.islice(entries, MAX_FILES + 1))
         except OSError:
             continue
+        if len(listing) > MAX_FILES:
+            listing = listing[:MAX_FILES]
+            out.complete = False
+        # Sorted, because `os.scandir` yields in whatever order the
+        # filesystem keeps (name order on APFS, hash order on ext4), and
+        # everything built on this walk — which files a search reaches
+        # before its budget runs out, which ones an overview counts — would
+        # otherwise depend on the disk rather than on the repository.
+        listing.sort(key=lambda e: e.name)
+        for entry in listing:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if depth + 1 > MAX_DEPTH:
+                        out.complete = False
+                        continue
+                    if _skip_dir(entry.name) or _is_private(entry.path):
+                        continue
+                    queue.append((Path(entry.path),
+                                  f"{prefix}{entry.name}/", depth + 1))
+                elif entry.is_file(follow_symlinks=False):
+                    if _skip_file(entry.name) or _is_private(entry.path):
+                        continue
+                    # Checked HERE as well as at the top of the loop: one
+                    # big directory would otherwise carry the walk far past
+                    # the budget before anything noticed it was gone.
+                    if len(out.files) >= MAX_FILES:
+                        out.complete = False
+                        break
+                    out.files.append(
+                        (f"{prefix}{entry.name}", entry.stat().st_size))
+            except OSError:
+                continue
     return out
 
 
@@ -675,10 +689,56 @@ def overview(root: Path, name: str) -> tuple[str, str]:
 
 class Hits:
     def __init__(self):
-        self.lines: list[str] = []      # "path:line: text"
+        self.lines: list[str] = []      # "path:line: text", best first
         self.found = 0
         self.capped = False             # more than we bothered to count
         self.tool = "walk"
+
+
+# Where a file counts as a test. Deliberately narrow: `testing/` and `specs/`
+# are not here, because `numpy/testing` is library code and `specs/` is
+# where `builds.py` writes design documents in every project JARVIS builds.
+TEST_DIRS = frozenset({"test", "tests", "__tests__"})
+
+
+def _is_test(relative: str) -> bool:
+    """A test file, by its directory or its name: `tests/…`, `test_x.py`,
+    `x_test.go`, `x.test.ts`, `x.spec.ts`, `x_spec.rb`, `conftest.py`."""
+    *dirs, name = relative.lower().split("/")
+    if any(d in TEST_DIRS for d in dirs):
+        return True
+    stem = name.split(".", 1)[0]
+    return (stem in ("test", "tests", "conftest")
+            or stem.startswith("test_")
+            or stem.endswith(("_test", "_spec"))
+            or ".test." in name or ".spec." in name)
+
+
+def _rank(relative: str, number: int) -> tuple:
+    """The order hits are reported in, whichever tool found them.
+
+    Only SEARCH_MAX_HITS lines are shown, so this order decides WHICH files
+    the brain sees, not just how they are laid out. It used to be ripgrep's
+    output order — and ripgrep, multi-threaded, finished files in whatever
+    order its threads reached them: the same question showed different files
+    on different runs, and `brain.py` fell out of the eight shown for a
+    constant it defines.
+
+    Source before tests, because "where does X live" asks for where it is
+    defined and used; a test naming it is rarely the answer, and with eight
+    slots a well-tested symbol would otherwise be shown mostly in its tests.
+    The header still gives the full count, so nothing is hidden by this.
+    Then by path, component by component (ripgrep's own `--sort path`
+    order), then by line.
+    """
+    return (_is_test(relative), tuple(relative.split("/")), number)
+
+
+def _best(found: list[tuple[str, int, str]]) -> list[str]:
+    """The SEARCH_MAX_HITS best (relative path, line, text) hits, formatted."""
+    found.sort(key=lambda hit: _rank(hit[0], hit[1]))
+    return [f"{relative}:{number}: {text}"
+            for relative, number, text in found[:SEARCH_MAX_HITS]]
 
 
 def _rg_path() -> str | None:
@@ -700,7 +760,14 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
         binary, "--fixed-strings", "--ignore-case", "--line-number",
         "--no-heading", "--color", "never", "--no-messages",
         "--max-filesize", str(SEARCH_MAX_FILE_BYTES),
-        "--max-count", "3", "--threads", "4",
+        "--max-count", "3",
+        # `_rank` puts the hits in order afterwards, but only the ones that
+        # arrive before SEARCH_HIT_COUNT_CAP: past the cap, WHICH hits got
+        # counted is ripgrep's output order. Sorting makes that the same on
+        # every run too. It also makes ripgrep single-threaded, which the
+        # clock budget above absorbs: on this repository ripgrep takes about
+        # 7 ms threaded or sorted.
+        "--sort", "path",
     ]
     for ignored in sorted(IGNORED_DIRS):
         args += ["--glob", f"!{ignored}/"]
@@ -724,14 +791,17 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
 
     hits = Hits()
     hits.tool = "rg"
+    real_root = Path(os.path.realpath(str(root)))
+    found: list[tuple[str, int, str]] = []
     for raw in stdout.decode("utf-8", "replace").splitlines():
         parts = raw.split(":", 2)
         if len(parts) < 3:
             continue
         path_text, number, body = parts
         try:
+            line_number = int(number)
             real = Path(path_text).resolve()
-            relative = real.relative_to(Path(os.path.realpath(str(root))))
+            relative = real.relative_to(real_root)
         except (ValueError, OSError):
             continue
         if sensitive_reason(relative) or private_reason(real):
@@ -740,8 +810,8 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
         if hits.found > SEARCH_HIT_COUNT_CAP:
             hits.capped = True
             break
-        if len(hits.lines) < SEARCH_MAX_HITS:
-            hits.lines.append(f"{relative}:{number}: {_clip(body)}")
+        found.append((relative.as_posix(), line_number, _clip(body)))
+    hits.lines = _best(found)
     return hits
 
 
@@ -760,6 +830,7 @@ def search_by_walk(root: Path, query: str) -> Hits:
 
     deadline = time.monotonic() + SEARCH_SECONDS
     budget = SEARCH_BYTE_BUDGET
+    found: list[tuple[str, int, str]] = []
     for relative, size in walk(root, deadline=deadline).files:
         if time.monotonic() > deadline or budget <= 0:
             hits.capped = True
@@ -781,15 +852,14 @@ def search_by_walk(root: Path, query: str) -> Hits:
                 continue
             hits.found += 1
             per_file += 1
-            if len(hits.lines) < SEARCH_MAX_HITS:
-                hits.lines.append(
-                    f"{relative}:{number}: "
-                    f"{_clip(line.decode('utf-8', 'replace'))}")
+            found.append((relative, number,
+                          _clip(line.decode("utf-8", "replace"))))
             if per_file >= 3:
                 break
         if hits.found > SEARCH_HIT_COUNT_CAP:
             hits.capped = True
             break
+    hits.lines = _best(found)
     return hits
 
 
