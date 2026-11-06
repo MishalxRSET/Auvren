@@ -191,6 +191,12 @@ arbitrary LLM and file content, so everything goes through
 - `scripts/install_autostart.ps1` — Background start at Windows sign-in
 - `stt.py` — On-device speech recognition: `EnergyVAD`, `Segmenter`,
   `Transcriber` (faster-whisper), `LocalEars`, `python stt.py --setup`
+- `models/wakeword/hey_auvren_v0.1.onnx` — The trained "Hey Auvren" model
+  (`scripts/train_wakeword.py`; synthetic voices only). Held-out: ~80% recall
+  on unseen voices, 0.37 false wakes/hour on the half of openWakeWord's
+  validation stream the threshold was not chosen on, 55/60 in a live
+  runtime stream with none false. Not trusted alone (`engine_trusted`)
+- `scripts/train_wakeword.py` — Retrains it (`requirements-train.txt`)
 - `wakeword.py` — The wake word: `WakeGate` (pure window/hold/follow-up
   state), `strip_wake_phrase`, `WakeListener` (openWakeWord on the mic,
   optional deps), `python wakeword.py --setup`

@@ -77,6 +77,7 @@ def test_settings(monkeypatch):
 
 def test_model_files_live_in_the_data_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(w, "BUNDLED_DIR", tmp_path / "no-bundle")
     monkeypatch.delenv("WAKE_WORD", raising=False)
     wake, mel, emb = w.model_files()
     assert wake == tmp_path / "wakeword" / "hey_auvren_v0.1.onnx"
@@ -91,6 +92,7 @@ def test_engine_problem_names_the_missing_piece(monkeypatch, tmp_path):
 
 def test_until_hey_auvren_is_trained_the_engine_says_so(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(w, "BUNDLED_DIR", tmp_path / "no-bundle")
     monkeypatch.delenv("WAKE_WORD", raising=False)
     for name in ("numpy", "openwakeword", "sounddevice"):
         monkeypatch.setitem(sys.modules, name, type(sys)(name))
@@ -545,3 +547,15 @@ def test_a_self_trained_model_is_not_trusted_alone(monkeypatch):
     monkeypatch.delenv("WAKE_ENGINE_ONLY")
     monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
     assert w.engine_trusted() is True, "openWakeWord's own models are"
+
+
+def test_the_repository_ships_the_trained_model():
+    """scripts/train_wakeword.py's output, in openWakeWord's own shape."""
+    found = sorted(w.BUNDLED_DIR.glob("hey_auvren*.onnx"))
+    assert found, "models/wakeword/hey_auvren_v0.1.onnx"
+    onnx = pytest.importorskip("onnx")
+    m = onnx.load(str(found[-1]))
+    dims = [d.dim_value or d.dim_param for d in m.graph.input[0].type.tensor_type.shape.dim]
+    assert dims[1:] == [16, 96]
+    out = [d.dim_value or d.dim_param for d in m.graph.output[0].type.tensor_type.shape.dim]
+    assert out[1:] == [1]

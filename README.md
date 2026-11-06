@@ -241,10 +241,19 @@ before you have clicked anything.
 the orb dims and the page says what to say. He then listens for one request,
 stays awake while he answers, and for a few seconds after, so you can reply
 "yes" without waking him again. Say it in one breath ("Hey Auvren, what time
-is it?") or pause after it. No pretrained audio model knows "Hey Auvren" yet,
-so it is heard by speech recognition — on the laptop, if installed above;
-`WAKE_WORD=off` brings back always-listening. (`WAKE_WORD=hey_jarvis` plus
-`requirements-wakeword.txt` uses openWakeWord's pretrained model instead.)
+is it?") or pause after it. It is heard two ways: by speech recognition
+(installed above), and by a small audio model trained for "Hey Auvren" that
+ships in `models/wakeword/` — which also hears it while Auvren is talking, so
+it can cut him off. Install its engine with
+`pip install -r requirements-wakeword.txt` then `python wakeword.py --setup`.
+`WAKE_WORD=off` brings back always-listening.
+
+The model was trained on synthetic voices only (`scripts/train_wakeword.py`):
+on voices it never trained on it catches about 80% of phrases, and on
+openWakeWord's validation recordings it false-wakes about 0.4 times an hour.
+That is why speech recognition keeps listening for "Hey Auvren" too
+(`WAKE_ENGINE_ONLY=1` to rely on the model alone). Record 20–50 clips of your
+own voice saying it and retrain with `--my-recordings` for the real accuracy.
 
 `get_piper.ps1` downloads `piper.exe` and one voice (`en_GB-alan-medium`, a
 British male voice; pass `-Voice en_US-ryan-high` or any name from the
