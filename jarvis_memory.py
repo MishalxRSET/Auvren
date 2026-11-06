@@ -181,7 +181,7 @@ def list_memories() -> list[str]:
 
 INDEX_NAME = "MEMORY.md"
 INDEX_HEADER = (
-    "# What JARVIS remembers\n\n"
+    "# What Auvren remembers\n\n"
     "One line per memory. This file is loaded into every conversation, so it\n"
     "stays short; the detail lives in `memory/`.\n\n"
 )

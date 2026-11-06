@@ -332,11 +332,11 @@ function askBand(s: SessionRow): HTMLElement {
     if (s.needs_a_human_hand) {
       c.foot.prepend(pill("your keystroke", "bad"));
       c.foot.append(el("span", "callout-note",
-        "JARVIS cannot answer this one — it wants a key pressed in that terminal."));
+        "Auvren cannot answer this one — it wants a key pressed in that terminal."));
     } else if (s.steerable) {
       c.foot.prepend(pill("steerable", "ok", "ghost"));
       c.foot.append(el("span", "callout-note",
-        "JARVIS can reply to this one over its inbox socket."));
+        "Auvren can reply to this one over its inbox socket."));
     } else {
       c.foot.prepend(pill("no inbox socket", "warn", "ghost"));
       c.foot.append(el("span", "callout-note",
@@ -723,7 +723,7 @@ async function reconcile(): Promise<void> {
     paintTakenAt();
   } catch (e) {
     console.error("[sessions] reconcile failed", e);
-    showSessionsBanner("Cannot reach the JARVIS server.");
+    showSessionsBanner("Cannot reach the Auvren server.");
   }
 }
 
@@ -773,7 +773,7 @@ export function initSessions(): void {
     onReconcile: () => void reconcile(),
     onSessionEvent,
     onConnectionChange: (connected) => {
-      if (!connected) showSessionsBanner("Reconnecting to JARVIS…");
+      if (!connected) showSessionsBanner("Reconnecting to Auvren…");
     },
   });
 

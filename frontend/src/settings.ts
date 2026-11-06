@@ -1,5 +1,5 @@
 /**
- * JARVIS — Settings Panel
+ * Auvren — Settings Panel
  *
  * Overlay panel for API keys, connection status, preferences, and system info.
  * Slides in from the right with glass-morphism styling.
@@ -66,7 +66,7 @@ function buildPanelHTML(): string {
       </div>
 
       <div class="settings-welcome" id="settings-welcome" style="display:none">
-        <p>Welcome to JARVIS. Let's get you set up.</p>
+        <p>Welcome to Auvren. Let's get you set up.</p>
       </div>
 
       <div class="settings-body">

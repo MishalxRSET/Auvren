@@ -206,7 +206,7 @@ function sessionRow(s: SessionRow): HTMLElement {
     if (s.needs_a_human_hand) {
       const hand = el("div", "session-hand");
       hand.append(pill("your keystroke", "bad"),
-        el("span", "row-meta", "JARVIS can't answer this one"));
+        el("span", "row-meta", "Auvren can't answer this one"));
       r.addBody(hand);
     }
   } else if (s.summary) {
@@ -328,7 +328,7 @@ function renderDetail(): void {
   host.replaceChildren();
 
   if (projects.length === 0) {
-    host.append(emptyState("No projects found yet. JARVIS lists a project as "
+    host.append(emptyState("No projects found yet. Auvren lists a project as "
       + "soon as a conversation or a run touches it."));
     return;
   }
@@ -390,7 +390,7 @@ async function reconcile(): Promise<void> {
     showBanner(null);
   } catch (e) {
     console.error("[projects] reconcile failed", e);
-    showBanner("Cannot reach the JARVIS server.");
+    showBanner("Cannot reach the Auvren server.");
     return;
   }
   paintList();

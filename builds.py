@@ -112,7 +112,7 @@ def render_spec(spec: str, constraints: str = "", non_goals: str = "",
              "Status: Approved — settled with the user by voice, before the "
              "build was started.",
              "",
-             "> Written by JARVIS from the conversation in which this was "
+             "> Written by Auvren from the conversation in which this was "
              "agreed. It is the build's source of truth: it outlives the "
              "session that reads it, and a session that has compacted or been "
              "replaced starts again from here.",

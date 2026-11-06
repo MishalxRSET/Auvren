@@ -1,5 +1,5 @@
 /**
- * JARVIS — Main entry point.
+ * Auvren — Main entry point.
  *
  * Wires together the orb visualization, WebSocket communication,
  * speech recognition, and audio playback into a single experience.
@@ -174,7 +174,7 @@ socket.onMessage((msg) => {
       if (currentState !== "speaking") transition("speaking");
       audioPlayer.enqueue(data, Number(msg.utt), Number(msg.idx));
     }
-    if (msg.text) console.log("[JARVIS]", msg.text);
+    if (msg.text) console.log("[Auvren]", msg.text);
   } else if (type === "stop") {
     audioPlayer.stop();
     transition(isMuted ? "idle" : "listening");
@@ -188,7 +188,7 @@ socket.onMessage((msg) => {
     else if (state === "idle") transition(isMuted ? "idle" : "listening");
   } else if (type === "text") {
     // A chunk TTS could not voice: show it instead of losing it
-    console.log("[JARVIS]", msg.text);
+    console.log("[Auvren]", msg.text);
     statusEl.textContent = String(msg.text);
   } else if (type === "notice") {
     // Shown, never spoken. The server sends one when it is about to be busy
@@ -272,7 +272,7 @@ btnRestart.addEventListener("click", async (e) => {
 btnFixSelf.addEventListener("click", (e) => {
   e.stopPropagation();
   menuDropdown.style.display = "none";
-  // Activate work mode on the WebSocket session (JARVIS becomes Claude Code's voice)
+  // Activate work mode on the WebSocket session (Auvren becomes Claude Code's voice)
   // Milestone 1 has no tools yet; "Fix yourself" returns as a brain tool later.
   statusEl.textContent = "fix-yourself is not available in this build";
 });

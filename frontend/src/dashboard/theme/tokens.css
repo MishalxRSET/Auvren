@@ -1,12 +1,12 @@
 /* ===========================================================================
-   JARVIS DASHBOARD — TOKENS
+   Auvren DASHBOARD — TOKENS
    ---------------------------------------------------------------------------
    The single place the look is defined. Everything downstream (primitives,
    views) refers to these names and never to a raw hue, size or duration.
 
    Palette is lifted from the orb (frontend/src/orb.ts): a #05070c ground with
    #4ca8e8 particles and white-hot highlights, so the dashboard reads as the
-   same machine as JARVIS's face.
+   same machine as Auvren's face.
 
    TONES
    -----

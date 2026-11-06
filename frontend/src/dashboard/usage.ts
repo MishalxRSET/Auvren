@@ -1,12 +1,12 @@
 /**
  * The Usage view: what the subscription has left, and who spent it.
  *
- * THE UNIT IS NOT DOLLARS. JARVIS runs on the user's Claude subscription —
+ * THE UNIT IS NOT DOLLARS. Auvren runs on the user's Claude subscription —
  * `claude_env` scrubs every ANTHROPIC_* variable so the CLI can never bill a
  * key — so a cost figure here is a price list for API calls nobody made. It
  * was the largest number on the masthead this morning and was removed for
  * exactly that reason. Tokens and share-of-limit are the honest units. The
- * one dollar figure on this page sits in JARVIS's own runs panel, small,
+ * one dollar figure on this page sits in Auvren's own runs panel, small,
  * labelled as an API-list equivalent, and never as a headline.
  *
  * THE OTHER RULE: never render a number we do not have. Three separate
@@ -16,7 +16,7 @@
  *                        brain has taken a turn.
  *   /api/usage/sessions  the transcript scan. Only exists if there are
  *                        transcripts on disk.
- *   /api/runs/stats      JARVIS's own runs.
+ *   /api/runs/stats      Auvren's own runs.
  *
  * — so each panel says what it does not know, in words, rather than
  * borrowing another panel's confidence.
@@ -120,7 +120,7 @@ function renderLimits(host: HTMLElement): void {
   if (!limits.measured) {
     note.append(pill("no reading", "warn"));
     note.append(el("span", undefined,
-      "JARVIS only learns where the windows stand while a turn is running, "
+      "Auvren only learns where the windows stand while a turn is running, "
       + "and none has run since he started. Nothing has been measured — "
       + "which is not the same as nothing being used."));
   } else if (limits.stale) {
@@ -338,7 +338,7 @@ function renderSessions(host: HTMLElement, meta: (t: string) => void): void {
   if (scan.sessions.length === 0) {
     meta("");
     host.append(emptyState(scan.measured
-      ? "No conversations of yours on this machine — only JARVIS's own work, "
+      ? "No conversations of yours on this machine — only Auvren's own work, "
         + "which is below."
       : "Nothing measured yet."));
     return;
@@ -420,7 +420,7 @@ function renderBackground(host: HTMLElement, meta: (t: string) => void): void {
     r.setTitle(agentName(agent));
     r.setSub(session.project || shortId(session.session_id));
 
-    if (session.own) r.addTrail(pill("JARVIS's own", "idle", "ghost"));
+    if (session.own) r.addTrail(pill("Auvren's own", "idle", "ghost"));
     // An agent dispatched by another agent, not by the conversation. Only
     // shown when the sidecar actually said so — depth 0 means no sidecar,
     // which is unknown depth, not top level.
@@ -439,12 +439,12 @@ function renderBackground(host: HTMLElement, meta: (t: string) => void): void {
   host.append(list);
 }
 
-// ── section 6: JARVIS's own machinery ───────────────────────────────────────
+// ── section 6: Auvren's own machinery ───────────────────────────────────────
 
 function renderOwn(host: HTMLElement): void {
   host.replaceChildren();
   host.append(el("div", "usage-note",
-    "JARVIS's brain and the one-shot runs he spawns register as Claude Code "
+    "Auvren's brain and the one-shot runs he spawns register as Claude Code "
     + "sessions like any other, and were once counted as the user's "
     + "conversations — 12 became 16. They are kept here so they are visible "
     + "without being mixed into the figures above."));
@@ -483,7 +483,7 @@ function renderOwn(host: HTMLElement): void {
   host.append(el("div", "usage-footnote",
     `The CLI priced today's runs at $${runs.total_cost_usd.toFixed(2)} — that `
     + "is what these tokens WOULD have cost through the API. Nothing was "
-    + "billed: JARVIS runs on the subscription and the brain scrubs every "
+    + "billed: Auvren runs on the subscription and the brain scrubs every "
     + "ANTHROPIC_* variable so the CLI cannot reach a key. Treat it as a "
     + "sense of scale, not a bill."));
 }
@@ -511,7 +511,7 @@ function build(): Sections | null {
   const modelsPanel = panel("By Model");
   const sessionsPanel = panel("By Conversation");
   const backgroundPanel = panel("Background & Subagents");
-  const ownPanel = panel("JARVIS's Own Work", { quiet: true });
+  const ownPanel = panel("Auvren's Own Work", { quiet: true });
 
   const overallBody = el("div");
   overallPanel.body.replaceChildren(overallBody, sparkHost);

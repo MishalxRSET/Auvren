@@ -7,7 +7,7 @@ import { resolve } from "path";
 // hostile page that iframes this dev server and harvests a click gets a
 // proxied POST carrying that trusted Origin -- the exact exploit the guard
 // exists to stop, routed around it. Proxied /api responses already carry
-// these from JARVIS; the HTML itself did not.
+// these from Auvren; the HTML itself did not.
 const SECURITY_HEADERS = {
   "X-Frame-Options": "DENY",
   "Content-Security-Policy": "frame-ancestors 'none'",

@@ -1,5 +1,5 @@
 /* ===========================================================================
-   JARVIS DASHBOARD — VIEWS
+   Auvren DASHBOARD — VIEWS
    ---------------------------------------------------------------------------
    Everything here is layout or copy-specific to one view. If a rule in this
    file starts looking generally useful, it belongs in primitives.css instead.
@@ -278,11 +278,11 @@
 .memory-row-when { --w: 96px; }
 
 /* ── Specs (the review surface) ───────────────────────────────────────────────
-   Master-detail. Left: what JARVIS has written down. Right: the document,
+   Master-detail. Left: what Auvren has written down. Right: the document,
    with a number beside every top-level section.
 
    The numbers are load-bearing, not ornament: they are how the user addresses
-   a section out loud ("change three"), and they are the same numbers JARVIS
+   a section out loud ("change three"), and they are the same numbers Auvren
    reads back. So they are sized and coloured like an instrument's channel
    labels — the loudest thing in the block after the heading itself. */
 .specs-count { --w: 56px; }
@@ -602,7 +602,7 @@
 .sd { display: flex; flex-direction: column; gap: var(--sp-4); }
 
 /* A session's NAME is its identity — the thing a person says out loud to
-   JARVIS — so it is the last part of the row allowed to truncate. Without
+   Auvren — so it is the last part of the row allowed to truncate. Without
    this the summary beside it shrank the name to "Ferra…". */
 .sess-row .row-title { min-width: 6.5em; }
 

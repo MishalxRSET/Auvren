@@ -48,7 +48,7 @@ export interface RunStats {
  *
  * `utilization` is a percentage, and it is `null` whenever nobody has
  * measured this window yet — which is the normal state of a freshly started
- * JARVIS, because the reading only arrives when the brain takes a turn. Null
+ * Auvren, because the reading only arrives when the brain takes a turn. Null
  * is NOT zero and must never be drawn as an empty gauge.
  */
 export interface UsageWindow {
@@ -115,7 +115,7 @@ export async function getStats(period = "day"): Promise<RunStats> {
 }
 
 /**
- * Usage against the subscription's limits. JARVIS runs on the user's Claude
+ * Usage against the subscription's limits. Auvren runs on the user's Claude
  * subscription, so this — not a dollar figure — is what "how much is left"
  * means here.
  */
@@ -192,7 +192,7 @@ export async function listSessions(): Promise<SessionsSnapshot> {
 }
 
 /**
- * JARVIS's long-term memory: a folder of plain Markdown at
+ * Auvren's long-term memory: a folder of plain Markdown at
  * `<JARVIS_DATA_DIR>/jarvis/` (see `data_paths.py` / `jarvis_memory.py`).
  * This client targets the contract specified for a not-yet-built backend
  * endpoint — see the Memory view report for the exact shape. A 404 on
@@ -267,7 +267,7 @@ export async function getMemoryDoc(kind: MemoryKind, slug: string): Promise<Memo
  */
 
 /** The cheap row for the project list. `latest_run` is `null` — not a
- * fabricated run — when nothing of JARVIS's has ever run here. */
+ * fabricated run — when nothing of Auvren's has ever run here. */
 export interface ProjectListItem {
   name: string;
   primary_path: string;
@@ -362,7 +362,7 @@ export async function openProject(
  * `textContent` and the safe Markdown renderer, never `innerHTML`.
  *
  * `number` on a section is the number the USER SAYS. It is computed once, in
- * `specs.py`, and the same value reaches JARVIS through `review_document` —
+ * `specs.py`, and the same value reaches Auvren through `review_document` —
  * so nothing on this side may ever renumber, reorder or filter sections.
  */
 
@@ -551,7 +551,7 @@ export interface SessionUsage {
   active_agents: number;
   agents: AgentUsage[];
   models: { model: string; tokens: Tokens }[];
-  /** JARVIS's own machinery (his brain, or a run he spawned). */
+  /** Auvren's own machinery (his brain, or a run he spawned). */
   own: boolean;
 }
 
@@ -573,7 +573,7 @@ export interface UsageSessions {
   roots: string[];
   files: number;
   bytes_read: number;
-  /** The user's work. JARVIS's own is in `own_totals`. */
+  /** The user's work. Auvren's own is in `own_totals`. */
   totals: Tokens;
   own_totals: Tokens;
   today: Tokens;

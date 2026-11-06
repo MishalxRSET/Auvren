@@ -1,5 +1,5 @@
 /* ===========================================================================
-   JARVIS DASHBOARD — SHELL
+   Auvren DASHBOARD — SHELL
    ---------------------------------------------------------------------------
    Page chrome: the ground and its texture, the masthead, the tab strip, the
    content column, the sliding detail pane and the connection banner.
@@ -103,8 +103,8 @@ body::after {
    Two zones, hairline-divided, in priority order: how much of the
    subscription is left, then what is happening right now and how much ran
    today. The limits are the hero because they are the thing the user cannot
-   find out any other way — and the thing that decides whether JARVIS can
-   answer at all. There is no spend here: JARVIS runs on a subscription and
+   find out any other way — and the thing that decides whether Auvren can
+   answer at all. There is no spend here: Auvren runs on a subscription and
    bills nobody, so a dollar figure would be a number that means nothing.  */
 .shell-stats {
   margin-left: auto;

@@ -796,13 +796,13 @@ def _forward(tool: str, arguments: dict) -> tuple[bool, str, dict | None]:
                 req, timeout=TIMEOUT_SEC, context=_ssl_context_for(endpoint)) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
-        return False, f"JARVIS refused the call ({e.code}).", None
+        return False, f"Auvren refused the call ({e.code}).", None
     except (urllib.error.URLError, OSError, TimeoutError):
-        return False, "The JARVIS server is unreachable.", None
+        return False, "The Auvren server is unreachable.", None
     except ValueError:
-        return False, "The JARVIS server sent something unreadable.", None
+        return False, "The Auvren server sent something unreadable.", None
     if not isinstance(payload, dict):
-        return False, "The JARVIS server sent something unreadable.", None
+        return False, "The Auvren server sent something unreadable.", None
     return (bool(payload.get("ok")), str(payload.get("text", "")),
             _image_block(payload.get("image")))
 

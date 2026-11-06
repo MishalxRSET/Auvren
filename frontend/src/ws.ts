@@ -1,5 +1,5 @@
 /**
- * WebSocket client for JARVIS server communication.
+ * WebSocket client for Auvren server communication.
  */
 
 export type MessageHandler = (msg: Record<string, unknown>) => void;
