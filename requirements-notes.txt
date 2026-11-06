@@ -1,0 +1,8 @@
+# Optional: read PDFs in your notes folder (NOTES_DIRS). Word (.docx),
+# PowerPoint (.pptx), .txt and .md need nothing extra.
+#
+#   pip install -r requirements-notes.txt
+#
+# For meaning-based search on top of keywords, also: ollama pull nomic-embed-text
+# (and numpy, which requirements-stt.txt already installs).
+pymupdf>=1.24

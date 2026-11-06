@@ -549,7 +549,7 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     names = {c.name for c in results}
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "voice", "local_brain", "wake_word", "speech_recognition",
+        "voice", "local_brain", "wake_word", "speech_recognition", "notes",
         "anthropic_key_leftover", "cross_session_inbound",
     }
 

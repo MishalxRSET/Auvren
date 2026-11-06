@@ -34,6 +34,8 @@ def _no_wake_word_unless_asked(monkeypatch):
     monkeypatch.setenv("STT_ENGINE", "browser")
     # And no tray icon: tests of it build one against a fake pystray.
     monkeypatch.setenv("AUVREN_TRAY", "0")
+    # And no notes folder: tests of notes_index give their own.
+    monkeypatch.delenv("NOTES_DIRS", raising=False)
     import sys
     server = sys.modules.get("server")
     if server is not None and hasattr(server, "wake_gate"):

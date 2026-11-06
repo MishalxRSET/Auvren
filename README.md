@@ -195,6 +195,19 @@ run, stopping one or creating a project is always read back to you first —
 only when you say yes. If Ollama is not running when the server starts,
 Auvren says so and comes up by itself once it is.
 
+**Your notes.** Point Auvren at the folders where your notes, PDFs and
+slides live and he answers from them, naming the file and page:
+
+```env
+NOTES_DIRS=C:\Users\you\Documents\Sem3;C:\Users\you\OneDrive\Notes
+```
+
+PDFs need `pip install -r requirements-notes.txt`; Word, PowerPoint, `.txt`
+and `.md` need nothing. Searching is by keyword out of the box; `ollama pull
+nomic-embed-text` adds search by meaning, so "inheritance" also finds the
+slide that only says "subclass extends". Everything stays on the laptop, and
+the index (`data\notes.db`) re-reads only files that changed.
+
 **Listening on the laptop.** Install on-device speech recognition and the
 microphone never leaves your machine, and any browser works — not just Chrome:
 

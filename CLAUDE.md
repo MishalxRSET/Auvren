@@ -132,6 +132,13 @@ this presents as "the UI is up but nothing works" rather than as an error.
   handed to the loop; Quit raises SIGINT so uvicorn shuts down cleanly.
   "Start with Windows" writes the same Startup shortcut as
   `install_autostart.ps1` (fixed PowerShell script, paths via env)
+- **Notes** (`notes_index.py`): the `search_notes` tool (both brains) over
+  NOTES_DIRS — .pdf per page (PyMuPDF, optional `requirements-notes.txt`),
+  .pptx per slide and .docx in parts (stdlib zip+XML), .txt/.md. SQLite FTS5
+  (BM25) in `<data>/notes.db`, fused (RRF) with Ollama embeddings
+  (`nomic-embed-text`) when pulled and numpy is present. Refreshed
+  incrementally by a background task (`NOTES_REFRESH_SEC`). Results are
+  wrapped untrusted and TAINT the turn ("a document in your notes")
 - **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
   on stdin, WAV out); Fish Audio optional (`tts.py`)
 - **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
@@ -185,6 +192,7 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
+- `notes_index.py` — Notes/PDF/slide index and search behind `search_notes`
 - `mic.py` — `MicHub`: one microphone capture, fanned out to every listener
 - `frontend/src/intro.ts` — The intro over the orb; longer when summoned
 - `tray.py` — The tray icon: state icons, menu, Start-with-Windows shortcut
@@ -285,6 +293,9 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   `127.0.0.1:11434`; a bind-all `0.0.0.0` is dialled as loopback),
   `OLLAMA_NUM_CTX` (8192), `OLLAMA_KEEP_ALIVE` (`30m`) — the local brain
 - `HONORIFIC` (optional, default `sir`) — how Auvren addresses the user
+- `NOTES_DIRS` (folders, `os.pathsep`-separated; unset = search_notes off,
+  the suite unsets it), `NOTES_EMBED_MODEL` (`nomic-embed-text`),
+  `NOTES_REFRESH_SEC` (300)
 - `STT_ENGINE` (`auto` default: on-device when installed; `local`;
   `browser`), `STT_MODEL` (`base.en`), `STT_LISTEN_WHILE_SPEAKING`,
   `STT_VAD_MIN_RMS` (400), `STT_BEAM_SIZE` (1), `STT_THREADS`,

@@ -89,6 +89,7 @@ from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
 import local_brain
 from local_brain import LocalBrain, LocalBrainConfig
 import mic
+import notes_index
 import stt
 import tray
 import wakeword
@@ -1677,6 +1678,7 @@ async def stop_brain_and_speech() -> None:
         log.warning(f"shutdown journal failed: {e}")
     _stop_tray()
     _stop_local_audio()
+    await _stop_notes()
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
                         ("tts client", _tts_client.aclose() if _tts_client else None)):
@@ -2320,6 +2322,7 @@ async def lifespan(application: FastAPI):
     await start_brain_and_speech()
     await _start_local_audio()
     _start_tray()
+    _start_notes()
     await start_session_watcher()
     # Deliberately not awaited: every check is time-boxed to 5s, so running
     # them inline could hold the server closed for that long before the UI can
@@ -2854,6 +2857,8 @@ TAINTING_TOOLS = {
     "search_repo": "a file in one of your projects",
     "repo_overview": "a file in one of your projects",
     "review_document": "a document in one of your projects",
+    # The user's notes folder holds PDFs and slides from anywhere.
+    "search_notes": "a document in your notes",
     # Other people's conversations, and what they told their sessions.
     "list_sessions": "another session's transcript",
     "session_detail": "another session's transcript",
@@ -6812,6 +6817,61 @@ def tool_recall(args: dict) -> str:
     return f"What I have:\n{_wrap_untrusted(_MEMORY_WRAP_NAME, chr(10).join(lines))}"
 
 
+# --- notes, PDFs and slides (notes_index.py) ---------------------------------
+
+notes: Optional[notes_index.NotesIndex] = None
+_notes_task: Optional[asyncio.Task] = None
+_NOTES_WRAP_NAME = "notes"
+
+
+def _start_notes() -> None:
+    """Index the user's notes folders now and keep the index current."""
+    global notes, _notes_task
+    if not notes_index.note_dirs() or _notes_task is not None:
+        return
+    notes = notes_index.NotesIndex(embedder=notes_index.OllamaEmbedder())
+
+    async def refresher():
+        every = _float_env("NOTES_REFRESH_SEC", 300.0)
+        while True:
+            try:
+                await asyncio.to_thread(notes.refresh)
+            except Exception as e:
+                log.warning(f"notes: refresh failed: {e}")
+            await asyncio.sleep(every)
+    _notes_task = asyncio.create_task(refresher())
+
+
+async def _stop_notes() -> None:
+    global _notes_task
+    task, _notes_task = _notes_task, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def tool_search_notes(args: dict) -> str:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return "What should I look for in your notes?"
+    if notes is None:
+        return ("I haven't been told where your notes are, sir. Set NOTES_DIRS to "
+                "the folder in the .env and restart me.")
+    hits = await asyncio.to_thread(notes.search, query, 5)
+    if not hits:
+        if notes.last_refresh is None:
+            return "I'm still reading your notes, sir. Ask me again in a minute."
+        return "Nothing in your notes on that."
+    lines = [f"[{h['file']}, {h['loc']}] {h['text'][:600]}" for h in hits]
+    # Somebody else's words — a PDF from anywhere — in a block, and the
+    # turn marked (TAINTING_TOOLS) as having read them.
+    return ("From your notes; cite the file and page:\n"
+            + _wrap_untrusted(_NOTES_WRAP_NAME, "\n\n".join(lines)))
+
+
 def tool_project_note(args: dict) -> str:
     project = str(args.get("project") or "").strip()
     text = str(args.get("text") or "").strip()
@@ -6831,6 +6891,8 @@ def tool_write_journal(args: dict) -> str:
     jarvis_memory.write_journal(text, reason=str(args.get("reason") or "manual"))
     return "Journal written."
 
+
+TOOL_HANDLERS["search_notes"] = tool_search_notes
 
 TOOL_HANDLERS.update({
     "remember": tool_remember,

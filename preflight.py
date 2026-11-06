@@ -564,6 +564,26 @@ def _check_wake_word_sync() -> Check:
                  message=f"The wake word is ready: \"{wakeword.spoken_phrase()}\".")
 
 
+def _check_notes_sync() -> Check:
+    """The notes folders (NOTES_DIRS), if any were given: they exist, and
+    PDFs in them can be read."""
+    import notes_index
+    dirs = notes_index.note_dirs()
+    if not dirs:
+        return Check(name="notes", status=STATUS_OK,
+                     message="No notes folder set (NOTES_DIRS); search_notes is off.")
+    missing = [str(d) for d in dirs if not d.is_dir()]
+    if missing:
+        return Check(name="notes", status=STATUS_WARN,
+                     message=f"Notes folder not found: {', '.join(missing)}",
+                     remedy="Fix NOTES_DIRS in .env (separate folders with ;).")
+    has_pdf = any(next(d.rglob("*.pdf"), None) for d in dirs)
+    if has_pdf and notes_index.pdf_problem():
+        return Check(name="notes", status=STATUS_WARN, message=notes_index.pdf_problem(),
+                     remedy="pip install -r requirements-notes.txt")
+    return Check(name="notes", status=STATUS_OK, message=f"Reading notes from {len(dirs)} folder(s).")
+
+
 def _check_anthropic_key_leftover_sync() -> Check:
     """A leftover ANTHROPIC_* var signals a misconfigured .env.
 
@@ -746,13 +766,13 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 if winplat.IS_WINDOWS:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
     _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
-                    _check_speech_recognition_sync,
+                    _check_speech_recognition_sync, _check_notes_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync)
 else:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
     _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
-                    _check_speech_recognition_sync,
+                    _check_speech_recognition_sync, _check_notes_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
@@ -823,6 +843,8 @@ def _phrase_for(check: Check) -> str:
         if "FISH_API_KEY" in msg:
             return "I have no Fish Audio key"
         return "my voice isn't installed"
+    if name == "notes":
+        return "I can't read all of your notes"
     if name == "speech_recognition":
         return "on-device speech recognition isn't installed"
     if name == "wake_word":
