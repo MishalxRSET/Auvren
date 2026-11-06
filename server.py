@@ -87,6 +87,8 @@ import tts
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
 import local_brain
 from local_brain import LocalBrain, LocalBrainConfig
+import mic
+import stt
 import wakeword
 from speech import Priority, SpeechScheduler
 
@@ -592,6 +594,15 @@ wake_gate = wakeword.WakeGate(
     follow_up=_float_env("WAKE_FOLLOW_UP_SEC", 8.0))
 wake_listener: Optional[wakeword.WakeListener] = None
 _wake_sleep_timer: Optional[asyncio.TimerHandle] = None
+
+# Who turns speech into text: "local" (stt.py, on this machine) or "browser"
+# (Chrome's recogniser). Decided at import; falls back to "browser" if the
+# on-device ears will not start.
+STT_MODE = stt.mode()
+mic_hub: Optional[mic.MicHub] = None
+local_ears: Optional[stt.LocalEars] = None
+_mic_muted = False
+_auvren_speaking = False
 _WAKE_HOLDING_STATES = ("thinking", "speaking", "compacting")
 
 
@@ -603,10 +614,19 @@ def _wake_frame() -> dict:
 def _wake_on_status(msg: dict) -> None:
     """Every status frame the server sends is also the gate's cue: awake
     while Auvren thinks or speaks, then a follow-up window once he is done,
-    so an answer to his question needs no second wake word."""
-    if not wake_gate.enabled or msg.get("type") != "status":
+    so an answer to his question needs no second wake word.
+
+    It is the on-device ears' cue too: they stop listening while he speaks
+    (a raw microphone has no echo cancellation; see stt.py)."""
+    global _auvren_speaking
+    if msg.get("type") != "status":
         return
     state = msg.get("state")
+    if state in ("speaking", "idle", "thinking"):
+        _auvren_speaking = state == "speaking"
+        _apply_ears_pause()
+    if not wake_gate.enabled:
+        return
     if state in _WAKE_HOLDING_STATES:
         wake_gate.hold()
     elif state == "idle":
@@ -643,9 +663,14 @@ async def _wake_up(source: str, score: Optional[float] = None,
     """The wake word was heard — by the engine ("audio") or in a transcript.
 
     `was_awake` is passed by callers whose gate call has ALREADY opened the
-    window, so the browser still hears that Auvren just woke."""
-    if not wake_gate.enabled:
+    window, so the browser still hears that Auvren just woke.
+
+    Heard by the engine WHILE he is talking, it is the way to cut him off:
+    the on-device ears are paused while he speaks, the engine is not."""
+    if not wake_gate.enabled or (source == "audio" and _mic_muted):
         return
+    if source == "audio" and speech is not None and speech.is_speaking:
+        await speech.barge_in(keep_unread=False, reason="wake word")
     if was_awake is None:
         was_awake = wake_gate.awake
     wake_gate.open()
@@ -655,7 +680,7 @@ async def _wake_up(source: str, score: Optional[float] = None,
     _schedule_wake_sleep()
 
 
-def _start_wake_listener() -> None:
+def _start_wake_listener(stream_factory=None) -> None:
     """Start the wake-word engine if it is installed. Never raises: without
     it, a transcript that opens with the wake word still wakes Auvren."""
     global wake_listener
@@ -670,7 +695,9 @@ def _start_wake_listener() -> None:
     def heard(score: float) -> None:          # called on the listener's thread
         loop.call_soon_threadsafe(lambda: _spawn(_wake_up("audio", score)))
 
-    listener = wakeword.WakeListener(heard, threshold=_float_env("WAKE_THRESHOLD", 0.5))
+    kwargs = {"stream_factory": stream_factory} if stream_factory is not None else {}
+    listener = wakeword.WakeListener(heard, threshold=_float_env("WAKE_THRESHOLD", 0.5),
+                                     **kwargs)
     problem = listener.start()
     if problem:
         log.warning("wake word: engine off (%s)", problem)
@@ -683,6 +710,101 @@ def _stop_wake_listener() -> None:
     listener, wake_listener = wake_listener, None
     if listener is not None:
         listener.stop()
+
+
+# --- on-device speech recognition (stt.py) --------------------------------
+
+def _apply_ears_pause() -> None:
+    """Deaf while muted, and while he speaks unless told otherwise."""
+    if local_ears is not None:
+        local_ears.set_paused(_mic_muted or (_auvren_speaking and not stt.listen_while_speaking()))
+
+
+def _set_mic_muted(muted: bool) -> None:
+    global _mic_muted
+    if muted != _mic_muted:
+        log.info("microphone %s by the user", "muted" if muted else "unmuted")
+    _mic_muted = muted
+    _apply_ears_pause()
+
+
+def _ears_should_transcribe() -> bool:
+    """Called on the ears' thread when an utterance ends. With the wake
+    engine running, nothing is transcribed while Auvren is asleep — the
+    engine decides. Without it the words ARE the wake word, so everything
+    is (on this machine, and kept nowhere)."""
+    if not wake_gate.enabled or wake_listener is None:
+        return True
+    return wake_gate.awake
+
+
+def _on_local_speech() -> None:
+    """The on-device ears hear someone talking: keep an open window open
+    until he finishes the sentence (the browser's interims did this)."""
+    if wake_gate.enabled and wake_gate.awake:
+        wake_gate.open(wake_gate.interim_grace)
+
+
+def _stt_vocabulary() -> list[str]:
+    """Words to prime the recogniser with: the wake word and project names,
+    which Whisper otherwise mishears ("sitearc" -> "sitock")."""
+    words = ["Auvren", *wakeword.vocabulary(), "Claude Code"]
+    for p in list(cached_projects)[:40]:
+        name = p.get("name") if isinstance(p, dict) else None
+        if name:
+            words.append(str(name))
+    return words
+
+
+async def _start_local_audio() -> None:
+    """Open the microphone once, for the wake engine and the on-device ears.
+    Never raises: anything missing leaves Auvren listening as before."""
+    global mic_hub, local_ears, STT_MODE
+    want_ears = STT_MODE == "local"
+    want_wake = wake_gate.enabled and wakeword.engine_problem() is None
+    if not (want_ears or want_wake):
+        return
+    mic_hub = mic.MicHub()
+    if want_wake:
+        _start_wake_listener(stream_factory=mic_hub.subscribe)
+    if not want_ears:
+        return
+    loop = asyncio.get_running_loop()
+    problem = stt.engine_problem()
+    ears = None
+    if problem is None:
+        ears = stt.LocalEars(
+            lambda text: loop.call_soon_threadsafe(
+                lambda: _spawn(_on_final_transcript(text, source="local"))),
+            subscribe=mic_hub.subscribe,
+            should_transcribe=_ears_should_transcribe,
+            on_speech=lambda: loop.call_soon_threadsafe(_on_local_speech),
+            vocabulary=_stt_vocabulary)
+        try:
+            # Loading the model takes a second or two; never on the loop.
+            problem = await asyncio.wait_for(asyncio.to_thread(ears.start), timeout=120)
+        except asyncio.TimeoutError:
+            problem = "the speech model took too long to load"
+    if problem:
+        log.warning("on-device speech recognition off (%s); the browser will listen", problem)
+        if ears is not None:
+            ears.stop()
+        STT_MODE = "browser"
+        await _voice_emit({"type": "stt", "mode": STT_MODE})
+        return
+    local_ears = ears
+    _apply_ears_pause()
+
+
+def _stop_local_audio() -> None:
+    global local_ears, mic_hub
+    ears, local_ears = local_ears, None
+    if ears is not None:
+        ears.stop()
+    _stop_wake_listener()
+    hub, mic_hub = mic_hub, None
+    if hub is not None:
+        hub.close()
 
 
 async def _voice_emit(msg: dict) -> None:
@@ -1285,7 +1407,7 @@ async def stop_brain_and_speech() -> None:
         raise
     except Exception as e:
         log.warning(f"shutdown journal failed: {e}")
-    _stop_wake_listener()
+    _stop_local_audio()
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
                         ("tts client", _tts_client.aclose() if _tts_client else None)):
@@ -1927,7 +2049,7 @@ async def lifespan(application: FastAPI):
     run_store.sweep_stale_runs()
 
     await start_brain_and_speech()
-    _start_wake_listener()
+    await _start_local_audio()
     await start_session_watcher()
     # Deliberately not awaited: every check is time-boxed to 5s, so running
     # them inline could hold the server closed for that long before the UI can
@@ -6702,6 +6824,66 @@ def _scan_projects_sync() -> list[dict]:
 
 # -- WebSocket Voice Handler -----------------------------------------------
 
+async def _on_interim_transcript(text: str) -> None:
+    """Part of a sentence, still being spoken (browser recogniser only)."""
+    if speech is None:
+        return
+    was_awake = wake_gate.awake
+    gate = wake_gate.on_interim(text)
+    if gate == "wake":
+        await _wake_up("transcript", was_awake=was_awake)
+    if gate != "ignore":
+        # Asleep, somebody else's voice must not cut Auvren off.
+        await speech.user_interim(text)
+
+
+async def _on_final_transcript(text: str, source: str = "browser") -> None:
+    """One finished utterance, from Chrome's recogniser or the on-device one
+    (stt.py) — the same gate, echo filter and brain either way."""
+    if speech is None:
+        return
+    text = apply_speech_corrections(str(text or "").strip())
+    if not text:
+        return
+    was_awake = wake_gate.awake
+    gate, request = wake_gate.on_final(text)
+    if gate == "ignore":
+        log.info(f"User (asleep, ignored): {text}")
+        return
+    if gate == "wake":
+        log.info(f"User (wake word only): {text}")
+        await _wake_up("transcript", was_awake=was_awake)
+        return
+    if request != text:
+        log.info(f"User (wake word): {text}")
+        await _wake_up("transcript", was_awake=was_awake)
+    text = request
+    verdict = await speech.user_final(text)
+    if verdict == "replay":
+        # "Say that again": resend what was already synthesized — no brain
+        # turn, so no cost and no risk of coming back with different words.
+        # Never routed to _handle_utterance.
+        log.info(f"User (replay): {text}")
+        if not await speech.replay_last():
+            await speech.say(NOTHING_TO_REPLAY_LINE, Priority.NORMAL)
+        return
+    if verdict != "speech":
+        # Say WHY, so a dropped sentence can be diagnosed from the log alone.
+        # Live, "User (echo, ignored): now" was the first word of the user's
+        # reply being eaten, and it took a transcript read-through to see
+        # that -- the age of the last played chunk is the fact that decides it.
+        since = speech.seconds_since_last_played()
+        ago = f"{since:.1f}s after his last audio" if since != float("inf") \
+            else "with nothing of his played yet"
+        log.info(f"User ({verdict}, ignored, {ago}): {text}")
+        return
+    log.info(f"User{' (on-device)' if source == 'local' else ''}: {text}")
+    if _is_fresh_start(text):
+        _spawn(_start_fresh())
+        return
+    _spawn(_handle_utterance(text))
+
+
 @app.websocket("/ws/voice")
 async def voice_handler(ws: WebSocket):
     """
@@ -6711,6 +6893,8 @@ async def voice_handler(ws: WebSocket):
         {"type": "transcript", "text": "...", "isFinal": true}
         {"type": "interim", "text": "..."}          partial recognition, throttled
         {"type": "played", "utt": 3, "idx": 1}      one audio chunk finished playing
+        {"type": "mute", "muted": true}              the mute button (also stops the
+                                                     on-device ears and wake engine)
 
     Server -> Client:
         {"type": "config", "muteMicDuringSpeech": false}
@@ -6722,6 +6906,10 @@ async def voice_handler(ws: WebSocket):
         {"type": "wake", "enabled": true, "awake": false, "phrase": "Hey Jarvis",
          "cue": true}                                the wake word opened (cue) or
                                                      the listening window closed
+        {"type": "stt", "mode": "browser"}           who listens: "local" (stt.py, on
+                                                     this machine) or "browser" (also
+                                                     in `config`); the page runs Chrome's
+                                                     recogniser only for "browser"
 
     Run lifecycle events are published on /ws/runs, not here.
     """
@@ -6733,7 +6921,7 @@ async def voice_handler(ws: WebSocket):
         # the opening frames cannot be overtaken by a broadcast that lands
         # while they are in flight.
         _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH,
-                         "wake": _wake_frame()})
+                         "wake": _wake_frame(), "stt": STT_MODE})
         _enqueue(queue, {"type": "status", "state": "idle"})
 
         global _last_greeting_time
@@ -6772,6 +6960,9 @@ async def voice_handler(ws: WebSocket):
                 log.info("hush: stopped by the user")
                 await speech.barge_in(keep_unread=False, reason="hush (key)")
                 continue
+            if kind == "mute":
+                _set_mic_muted(bool(msg.get("muted")))
+                continue
             if kind == "interim":
                 # Logged because its ABSENCE is the diagnosis. A session that
                 # is capturing but returning nothing looks identical, from
@@ -6781,13 +6972,8 @@ async def voice_handler(ws: WebSocket):
                 # wrong happened after this point.
                 text = str(msg.get("text", ""))
                 log.info("mic-hears: %s", text[-70:])
-                was_awake = wake_gate.awake
-                gate = wake_gate.on_interim(text)
-                if gate == "wake":
-                    await _wake_up("transcript", was_awake=was_awake)
-                if gate != "ignore":
-                    # Asleep, somebody else's voice must not cut Auvren off.
-                    await speech.user_interim(text)
+                if local_ears is None:
+                    await _on_interim_transcript(text)
             elif kind == "played":
                 try:
                     # OverflowError is in there because `int(float('inf'))`
@@ -6797,47 +6983,13 @@ async def voice_handler(ws: WebSocket):
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
             elif kind == "transcript" and msg.get("isFinal"):
-                text = apply_speech_corrections(str(msg.get("text", "")).strip())
-                if not text:
+                if local_ears is not None:
+                    # Listening on this machine already: a tab still running
+                    # Chrome's recogniser would double every request.
+                    log.info("browser transcript ignored (listening on-device): %s",
+                             str(msg.get("text", ""))[:70])
                     continue
-                was_awake = wake_gate.awake
-                gate, request = wake_gate.on_final(text)
-                if gate == "ignore":
-                    log.info(f"User (asleep, ignored): {text}")
-                    continue
-                if gate == "wake":
-                    log.info(f"User (wake word only): {text}")
-                    await _wake_up("transcript", was_awake=was_awake)
-                    continue
-                if request != text:
-                    log.info(f"User (wake word): {text}")
-                    await _wake_up("transcript", was_awake=was_awake)
-                text = request
-                verdict = await speech.user_final(text)
-                if verdict == "replay":
-                    # "Say that again": resend what was already synthesized —
-                    # no brain turn, so no cost and no risk of coming back
-                    # with different words. Never routed to _handle_utterance.
-                    log.info(f"User (replay): {text}")
-                    if not await speech.replay_last():
-                        await speech.say(NOTHING_TO_REPLAY_LINE, Priority.NORMAL)
-                    continue
-                if verdict != "speech":
-                    # Say WHY, so a dropped sentence can be diagnosed from the
-                    # log alone. Live, "User (echo, ignored): now" was the first
-                    # word of the user's reply being eaten, and it took a
-                    # transcript read-through to see that -- the age of the
-                    # last played chunk is the fact that decides it.
-                    since = speech.seconds_since_last_played()
-                    ago = f"{since:.1f}s after his last audio" if since != float("inf") \
-                        else "with nothing of his played yet"
-                    log.info(f"User ({verdict}, ignored, {ago}): {text}")
-                    continue
-                log.info(f"User: {text}")
-                if _is_fresh_start(text):
-                    _spawn(_start_fresh())
-                    continue
-                _spawn(_handle_utterance(text))
+                await _on_final_transcript(str(msg.get("text", "")))
     except WebSocketDisconnect:
         log.info("Voice WebSocket disconnected")
     except Exception as e:

@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -293,9 +294,23 @@ async def synthesize_chunk(text: str, *, api_key: str, voice_id: str,
 
 # --- the one entry point -----------------------------------------------------
 
+# How names are SAID. "Auvren" is OV-ren, /ˈɒvrən/; Piper's phonemizer reads
+# the spelling as "oven" (heard back through Whisper as "Hey Oven"), so the
+# voice is handed a spelling it says right. Only the audio changes: the text
+# the browser shows, the transcript and the brain all keep "Auvren".
+_SAY_AS = ((re.compile(r"\bAuvren\b", re.IGNORECASE), "Ovren"),)
+
+
+def say_as(text: str) -> str:
+    for pattern, spoken in _SAY_AS:
+        text = pattern.sub(spoken, text)
+    return text
+
+
 async def synthesize(text: str, *, fish_api_key: str = "", fish_voice_id: str = "",
                      client: Optional[httpx.AsyncClient] = None) -> Optional[SynthResult]:
     """Speak one chunk with whichever engine is selected."""
+    text = say_as(text)
     if engine() == ENGINE_FISH:
         return await synthesize_chunk(text, api_key=fish_api_key, voice_id=fish_voice_id,
                                       client=client)

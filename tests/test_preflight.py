@@ -549,8 +549,8 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     names = {c.name for c in results}
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "voice", "local_brain", "wake_word", "anthropic_key_leftover",
-        "cross_session_inbound",
+        "voice", "local_brain", "wake_word", "speech_recognition",
+        "anthropic_key_leftover", "cross_session_inbound",
     }
 
 
@@ -693,13 +693,38 @@ def test_wake_word_off_is_fine(monkeypatch):
 
 
 def test_wake_word_without_the_engine_warns_but_does_not_fail(monkeypatch):
+    import stt
     import wakeword
     monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.setattr(stt, "mode", lambda: "browser")
     monkeypatch.setattr(wakeword, "engine_problem",
                         lambda: "The wake-word engine is not installed (openwakeword)")
     check = preflight._check_wake_word_sync()
     assert check.status == preflight.STATUS_WARN
     assert "requirements-wakeword.txt" in check.remedy
+
+
+def test_wake_word_heard_by_on_device_recognition_is_fine(monkeypatch):
+    import stt
+    import wakeword
+    monkeypatch.delenv("WAKE_WORD", raising=False)
+    monkeypatch.setattr(wakeword, "engine_problem", lambda: "no trained model yet")
+    monkeypatch.setattr(stt, "mode", lambda: "local")
+    check = preflight._check_wake_word_sync()
+    assert check.status == STATUS_OK and "Hey Auvren" in check.message
+
+
+def test_speech_recognition_states(monkeypatch):
+    import stt
+    monkeypatch.setattr(stt, "engine_problem", lambda: None)
+    monkeypatch.setenv("STT_ENGINE", "auto")
+    assert preflight._check_speech_recognition_sync().status == STATUS_OK
+    monkeypatch.setattr(stt, "engine_problem", lambda: "not installed")
+    assert preflight._check_speech_recognition_sync().status == STATUS_OK, \
+        "not installed and not asked for: the browser listens"
+    monkeypatch.setenv("STT_ENGINE", "local")
+    check = preflight._check_speech_recognition_sync()
+    assert check.status == preflight.STATUS_WARN and "requirements-stt.txt" in check.remedy
 
 
 def test_wake_word_ready(monkeypatch):

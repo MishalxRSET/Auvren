@@ -45,8 +45,8 @@ When a user clones this repo and starts Claude Code, help them:
    use the native installer (`irm https://claude.ai/install.ps1 | iex`) or set
    `JARVIS_CLAUDE_PATH` to `claude.exe`.
 4. Install Python dependencies: pip install -r requirements.txt — and, for
-   the wake word's local engine, `pip install -r requirements-wakeword.txt`
-   then `python wakeword.py --setup` (downloads the model, lists mics)
+   speech recognition on the laptop, `pip install -r requirements-stt.txt`
+   then `python stt.py --setup` (downloads base.en, lists mics)
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
@@ -56,7 +56,7 @@ When a user clones this repo and starts Claude Code, help them:
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
-11. Click to enable audio, then say "Hey Jarvis" and speak to Auvren
+11. Click to enable audio, then say "Hey Auvren" (OV-ren) and speak
 
 Do not pass `--reload` on Windows: uvicorn's reloader installs an event loop
 that cannot start subprocesses, so the brain and every run would fail.
@@ -88,14 +88,29 @@ this presents as "the UI is up but nothing works" rather than as an error.
   - `claude` — `brain.py`: a long-lived Claude Code process (Sonnet by
     default) on the user's subscription; no Anthropic API calls on the voice
     path
-- **Wake word** (`wakeword.py`, on by default): Auvren is asleep until
-  addressed. `WakeGate` is consulted where transcripts arrive in
+- **Speech recognition**: Chrome's Web Speech API (`STT_ENGINE=browser`) or
+  ON THE LAPTOP (`stt.py`, used automatically once installed): `mic.MicHub`
+  opens the microphone once and fans 80 ms frames out to the wake engine and
+  `LocalEars` (energy VAD -> `Segmenter` -> faster-whisper base.en int8 on a
+  worker thread). Its transcripts enter `_on_final_transcript` — the same
+  path, gate, echo filter and brain a browser transcript takes; browser
+  transcripts are ignored while it runs. The ears PAUSE while Auvren speaks
+  (no echo cancellation on a raw mic), driven by `_voice_emit`'s status
+  frames; the wake engine (if any) keeps listening and barges in. Whisper
+  is primed (`hotwords`) with "Auvren" and the project names. Optional deps
+  in `requirements-stt.txt`; the suite pins `STT_ENGINE=browser`
+- **Wake word** (`wakeword.py`, on by default): "Hey Auvren" (OV-ren).
+  Auvren is asleep until addressed. `WakeGate` is consulted where transcripts arrive in
   `/ws/voice` — asleep, a final is ignored and an interim never barges in.
   Awake = the wake word's window, OR held while he thinks/speaks (driven by
   the status frames `_voice_emit` sends), OR the follow-up window after he
-  finishes, so a confirmation "yes" needs no second wake word. The engine
-  (`WakeListener`: openWakeWord "hey_jarvis" on the mic, 16 kHz / 80 ms
-  frames, a background thread) is OPTIONAL — `requirements-wakeword.txt`,
+  finishes, so a confirmation "yes" needs no second wake word. No
+  pretrained model exists for "hey auvren", so it is matched in the
+  TRANSCRIPT (`strip_wake_phrase`, with the measured mishearings "overn",
+  "oven" accepted only after a greeting); the voice says the name via
+  `tts.say_as` ("Ovren"). The audio engine (`WakeListener`: openWakeWord on
+  the shared mic) runs only for a pretrained name (`WAKE_WORD=hey_jarvis`)
+  or a trained `<data>/wakeword/hey_auvren*.onnx`, and is OPTIONAL — `requirements-wakeword.txt`,
   kept out of requirements.txt because it pulls onnxruntime/scipy/sklearn
   (and tflite on Linux). Without it, a transcript that opens with the wake
   phrase still wakes him. The browser gets `wake` frames for the orb
@@ -152,6 +167,9 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
+- `mic.py` — `MicHub`: one microphone capture, fanned out to every listener
+- `stt.py` — On-device speech recognition: `EnergyVAD`, `Segmenter`,
+  `Transcriber` (faster-whisper), `LocalEars`, `python stt.py --setup`
 - `wakeword.py` — The wake word: `WakeGate` (pure window/hold/follow-up
   state), `strip_wake_phrase`, `WakeListener` (openWakeWord on the mic,
   optional deps), `python wakeword.py --setup`
@@ -240,7 +258,12 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   `127.0.0.1:11434`; a bind-all `0.0.0.0` is dialled as loopback),
   `OLLAMA_NUM_CTX` (8192), `OLLAMA_KEEP_ALIVE` (`30m`) — the local brain
 - `HONORIFIC` (optional, default `sir`) — how Auvren addresses the user
-- `WAKE_WORD` (default `hey_jarvis`; `off` disables; or a path to a custom
+- `STT_ENGINE` (`auto` default: on-device when installed; `local`;
+  `browser`), `STT_MODEL` (`base.en`), `STT_LISTEN_WHILE_SPEAKING`,
+  `STT_VAD_MIN_RMS` (400), `STT_BEAM_SIZE` (1), `STT_THREADS`,
+  `STT_LANGUAGE` (`en`), `MIC_DEVICE` (index or name; `WAKE_DEVICE` is the
+  older spelling)
+- `WAKE_WORD` (default `hey_auvren`; `off` disables; `hey_jarvis`; or a path to a custom
   `.onnx`), `WAKE_THRESHOLD` (0.5), `WAKE_WINDOW_SEC` (8),
   `WAKE_FOLLOW_UP_SEC` (8), `WAKE_DEVICE` (mic index or name). The suite
   pins `WAKE_WORD=off` in `tests/conftest.py` (the voice tests predate it,

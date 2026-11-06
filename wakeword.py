@@ -26,9 +26,17 @@ hearing everything, and an unusual word like "Auvren" is often misheard — but
 it is never deaf. With the engine running, the wake word is caught locally,
 before the recogniser has even finished the sentence.
 
-Until a custom "hey auvren" model is trained (the build plan's phase 7), the
-spoken wake word is "Hey Jarvis": it is the pretrained model openWakeWord
-ships.
+The wake word is "Hey Auvren" — said OV-ren, /ˈɒvrən/. openWakeWord ships no
+model for it (only "hey jarvis", "alexa", "hey mycroft", "hey rhasspy"), so
+until one is trained (the build plan's phase 7: Piper-generated samples of
+"hey ovren", trained on Colab, dropped into <data>/wakeword/hey_auvren.onnx)
+"Hey Auvren" is heard from the TRANSCRIPT — which, with on-device recognition
+(stt.py), never leaves the machine. Measured with real speech: Whisper hears
+OV-ren as "Overn" unprimed and as "Auvren" exactly when primed with the name,
+so the server always passes it as a hotword, and the common mishearings
+("hey overn", "hey oven") count when they follow a greeting.
+
+`WAKE_WORD=hey_jarvis` opts back into the pretrained audio model.
 """
 from __future__ import annotations
 
@@ -44,17 +52,25 @@ from typing import Callable, Optional
 log = logging.getLogger("jarvis.wakeword")
 
 OFF_VALUES = {"off", "0", "false", "no", "none", "disabled"}
-DEFAULT_MODEL = "hey_jarvis"
+DEFAULT_MODEL = "hey_auvren"
+
+# openWakeWord's own models: downloadable by name with `--setup`. Any other
+# name needs its own trained .onnx in <data>/wakeword.
+PRETRAINED = {"hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"}
 
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 1280           # 80 ms: openWakeWord's native frame
 
-# A request that opens with the wake word, spoken or typed into the
-# recogniser's transcript. "Auvren" is here although no audio model knows it
-# yet: when the recogniser does spell it right, it should count.
-_WAKE_PHRASE = re.compile(
-    r"\W*(?:(?:hey|hi|hello|ok|okay|oi|yo)\W+)?(?:jarvis|auvren)\b[\W_]*",
-    re.IGNORECASE)
+# How a recogniser spells the wake word's name. The first spellings are safe
+# on their own ("Auvren, open my notes"); the rest are what OV-ren is heard
+# as, and count only straight after a greeting — "hey oven" is the wake word,
+# "the oven is on" is not.
+_SPELLINGS = {
+    "auvren": (("auvren", "ovren"),
+               ("overn", "ovrin", "auvern", "avren", "ovaran", "ovan", "oven")),
+    "jarvis": (("jarvis",), ()),
+}
+_GREETING = r"(?:hey|hi|hello|ok|okay|oi|yo)"
 
 
 def setting() -> str:
@@ -67,22 +83,50 @@ def enabled() -> bool:
     return setting().lower() not in OFF_VALUES
 
 
-def spoken_phrase() -> str:
-    """What the user should say, for the UI hint."""
+def wake_name() -> str:
+    """The wake word as a model name: `hey_auvren`, `hey_jarvis`, or the
+    stem of a custom .onnx (`hey_auvren_v0.1.onnx` -> `hey_auvren`)."""
     value = setting()
     if value.lower().endswith(".onnx"):
         # Either separator: a Windows path must name the same phrase anywhere.
-        stem = re.split(r"[\\/]", value)[-1][:-len(".onnx")].split("_v")[0]
-        return stem.replace("_", " ").title()
-    return value.replace("_", " ").title()
+        return re.split(r"[\\/]", value)[-1][:-len(".onnx")].split("_v")[0].lower()
+    return value.lower()
+
+
+def spoken_phrase() -> str:
+    """What the user should say, for the UI hint."""
+    return wake_name().replace("_", " ").title()
+
+
+_pattern_cache: dict = {}
+
+
+def _wake_pattern() -> "re.Pattern":
+    name = wake_name()
+    pat = _pattern_cache.get(name)
+    if pat is None:
+        word = name.split("_")[-1]
+        alone, after_greeting = _SPELLINGS.get(word, ((word,), ()))
+        alone_re = "|".join(map(re.escape, alone))
+        any_re = "|".join(map(re.escape, alone + after_greeting))
+        pat = re.compile(rf"\W*(?:{_GREETING}\W+(?:{any_re})|(?:{alone_re}))\b[\W_]*",
+                         re.IGNORECASE)
+        _pattern_cache[name] = pat
+    return pat
 
 
 def strip_wake_phrase(text: str) -> tuple[bool, str]:
     """(True, rest) if `text` opens with the wake word, else (False, text)."""
-    m = _WAKE_PHRASE.match(text or "")
+    m = _wake_pattern().match(text or "")
     if not m:
         return False, text
     return True, text[m.end():].strip()
+
+
+def vocabulary() -> list[str]:
+    """Words to prime the recogniser with, so the name is spelled right."""
+    word = wake_name().split("_")[-1]
+    return [word.title()] if word else []
 
 
 def models_dir() -> Path:
@@ -97,8 +141,9 @@ def model_files() -> tuple[Path, Path, Path]:
     if value.lower().endswith(".onnx"):
         wake = Path(value)
     else:
-        found = sorted(d.glob(f"{value}*.onnx"))
-        wake = found[0] if found else d / f"{value}_v0.1.onnx"
+        name = value.lower()
+        found = sorted(d.glob(f"{name}*.onnx"))
+        wake = found[0] if found else d / f"{name}_v0.1.onnx"
     return wake, d / "melspectrogram.onnx", d / "embedding_model.onnx"
 
 
@@ -113,7 +158,13 @@ def engine_problem() -> Optional[str]:
                 "pip install -r requirements-wakeword.txt")
     except OSError as e:          # sounddevice without PortAudio
         return f"The microphone library would not load: {e}"
-    for f in model_files():
+    wake, *features = model_files()
+    if not wake.is_file():
+        if wake_name() not in PRETRAINED and not setting().lower().endswith(".onnx"):
+            return (f"There is no trained \"{spoken_phrase()}\" model yet, so the "
+                    "wake word is heard from what you say instead")
+        return f"The wake-word model {wake.name} is missing: python wakeword.py --setup"
+    for f in features:
         if not f.is_file():
             return f"The wake-word model {f.name} is missing: python wakeword.py --setup"
     return None
@@ -341,10 +392,11 @@ def setup() -> int:
         return 1
     target = models_dir()
     target.mkdir(parents=True, exist_ok=True)
-    name = setting()
-    names = [] if name.lower().endswith(".onnx") else [name]
+    name = wake_name()
+    names = [name] if name in PRETRAINED and not setting().lower().endswith(".onnx") else []
     print(f"Downloading wake-word models into {target} ...")
-    # Only the feature models when the wake model is the user's own file.
+    # Only the feature models when the wake word is not a pretrained one: a
+    # trained hey_auvren.onnx dropped in this folder then just works.
     openwakeword.utils.download_models(model_names=names or ["__none__"],
                                        target_directory=str(target))
     problem = engine_problem()

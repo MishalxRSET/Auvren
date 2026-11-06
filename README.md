@@ -5,7 +5,8 @@
 > Auvren began as [`ethanplusai/jarvis`](https://github.com/ethanplusai/jarvis),
 > a macOS project, and is being rebuilt for **Windows**. What works today:
 > a local brain (Ollama, offline) that hands coding to Claude Code, voice
-> (Piper, offline), a wake word ("Hey Jarvis"), the run pipeline, session watching, the dashboard,
+> (Piper, offline), speech recognition on the laptop (faster-whisper), a wake
+> word ("Hey Auvren"), the run pipeline, session watching, the dashboard,
 > opening Windows Terminal / Chrome / VS Code, and toast notifications. Not
 > yet on Windows: looking at the screen, answering a session's permission
 > prompt by keystroke, and messaging another session — those say so out loud.
@@ -194,22 +195,27 @@ run, stopping one or creating a project is always read back to you first —
 only when you say yes. If Ollama is not running when the server starts,
 Auvren says so and comes up by itself once it is.
 
-**The wake word.** Auvren is asleep until you say **"Hey Jarvis"** (the
-pretrained model; a custom "Hey Auvren" comes later) — the orb dims and the
-page says what to say. He then listens for one request, stays awake while he
-answers, and for a few seconds after, so you can reply "yes" without waking
-him again. Install the local engine for it:
+**Listening on the laptop.** Install on-device speech recognition and the
+microphone never leaves your machine, and any browser works — not just Chrome:
 
 ```powershell
-pip install -r requirements-wakeword.txt
-python wakeword.py --setup
+pip install -r requirements-stt.txt
+python stt.py --setup
 ```
 
-Without the engine he still wakes when a request *starts* with "Hey Jarvis"
-or "Auvren", from the transcript — slower and less sure, never deaf. Note that
-Chrome's recogniser is still hearing everything until speech recognition moves
-on-device; the wake word decides what Auvren *acts on*. `WAKE_WORD=off`
-brings back the always-listening behaviour.
+It is used automatically from the next start (`STT_ENGINE=browser` to keep
+Chrome's recogniser). A raw microphone has no echo cancellation, so while
+Auvren is speaking he stops listening; say "Hey Auvren" or press Esc to cut
+him off (with headphones, `STT_LISTEN_WHILE_SPEAKING=1`).
+
+**The wake word.** Auvren is asleep until you say **"Hey Auvren"** (OV-ren) —
+the orb dims and the page says what to say. He then listens for one request,
+stays awake while he answers, and for a few seconds after, so you can reply
+"yes" without waking him again. Say it in one breath ("Hey Auvren, what time
+is it?") or pause after it. No pretrained audio model knows "Hey Auvren" yet,
+so it is heard by speech recognition — on the laptop, if installed above;
+`WAKE_WORD=off` brings back always-listening. (`WAKE_WORD=hey_jarvis` plus
+`requirements-wakeword.txt` uses openWakeWord's pretrained model instead.)
 
 `get_piper.ps1` downloads `piper.exe` and one voice (`en_GB-alan-medium`, a
 British male voice; pass `-Voice en_US-ryan-high` or any name from the

@@ -29,10 +29,15 @@ def _no_wake_word_unless_asked(monkeypatch):
     variable that a reload reads.
     """
     monkeypatch.setenv("WAKE_WORD", "off")
+    # Likewise on-device speech recognition: a machine with faster-whisper
+    # installed would otherwise open its real microphone under test.
+    monkeypatch.setenv("STT_ENGINE", "browser")
     import sys
     server = sys.modules.get("server")
     if server is not None and hasattr(server, "wake_gate"):
         monkeypatch.setattr(server.wake_gate, "enabled", False)
+    if server is not None and hasattr(server, "STT_MODE"):
+        monkeypatch.setattr(server, "STT_MODE", "browser")
 
 
 @pytest.fixture(autouse=True)

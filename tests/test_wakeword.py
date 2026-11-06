@@ -19,29 +19,54 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import wakeword as w
 
 
+@pytest.fixture(autouse=True)
+def _the_default_wake_word(monkeypatch):
+    """conftest switches the wake word off for the rest of the suite; every
+    test here is about it, so they start from the default ("Hey Auvren")
+    and set WAKE_WORD themselves when they mean something else."""
+    monkeypatch.delenv("WAKE_WORD", raising=False)
+
+
 # --- the phrase ------------------------------------------------------------------
 
 @pytest.mark.parametrize("text,woke,rest", [
-    ("Hey Jarvis, what time is it?", True, "what time is it?"),
-    ("hey jarvis what time is it", True, "what time is it"),
-    ("Jarvis. Open my notes", True, "Open my notes"),
+    ("Hey Auvren, what time is it?", True, "what time is it?"),
+    ("hey auvren what time is it", True, "what time is it"),
+    ("Auvren. Open my notes", True, "Open my notes"),
     ("ok Auvren start the build", True, "start the build"),
-    ("Hey, Jarvis!", True, ""),
-    ("jarvis", True, ""),
+    ("Hey, Auvren!", True, ""),
+    ("auvren", True, ""),
+    # How OV-ren is actually heard: Whisper unprimed says "Overn", Piper's
+    # own reading of the spelling is heard as "Oven". After a greeting only.
+    ("Hey Overn, what time is it?", True, "what time is it?"),
+    ("hey oven stop", True, "stop"),
+    ("Ovren, play some music", True, "play some music"),
+    ("the oven is on", False, "the oven is on"),
+    ("oven timer for ten minutes", False, "oven timer for ten minutes"),
+    ("Owen said hi", False, "Owen said hi"),
+    ("Hey Jarvis what time is it", False, "Hey Jarvis what time is it"),
+    ("tell auvren I said hi", False, "tell auvren I said hi"),
+    ("auvrenify the thing", False, "auvrenify the thing"),
     ("what time is it", False, "what time is it"),
-    ("tell jarvis I said hi", False, "tell jarvis I said hi"),
-    ("jarvisdashboard is broken", False, "jarvisdashboard is broken"),
     ("hey there", False, "hey there"),
     ("", False, ""),
 ])
-def test_strip_wake_phrase(text, woke, rest):
+def test_strip_wake_phrase(text, woke, rest, monkeypatch):
+    monkeypatch.delenv("WAKE_WORD", raising=False)
     assert w.strip_wake_phrase(text) == (woke, rest)
+
+
+def test_hey_jarvis_is_still_there_if_chosen(monkeypatch):
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    assert w.strip_wake_phrase("Hey Jarvis, what time is it?") == (True, "what time is it?")
+    assert w.strip_wake_phrase("Hey Auvren, what time")[0] is False
+    assert w.spoken_phrase() == "Hey Jarvis" and w.vocabulary() == ["Jarvis"]
 
 
 def test_settings(monkeypatch):
     monkeypatch.delenv("WAKE_WORD", raising=False)
-    assert w.enabled() and w.setting() == "hey_jarvis"
-    assert w.spoken_phrase() == "Hey Jarvis"
+    assert w.enabled() and w.setting() == "hey_auvren"
+    assert w.spoken_phrase() == "Hey Auvren" and w.vocabulary() == ["Auvren"]
     for off in ("off", "OFF", "0", "false", "none"):
         monkeypatch.setenv("WAKE_WORD", off)
         assert not w.enabled()
@@ -54,7 +79,7 @@ def test_model_files_live_in_the_data_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("WAKE_WORD", raising=False)
     wake, mel, emb = w.model_files()
-    assert wake == tmp_path / "wakeword" / "hey_jarvis_v0.1.onnx"
+    assert wake == tmp_path / "wakeword" / "hey_auvren_v0.1.onnx"
     assert mel.parent == emb.parent == tmp_path / "wakeword"
 
 
@@ -62,6 +87,20 @@ def test_engine_problem_names_the_missing_piece(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     monkeypatch.setitem(sys.modules, "openwakeword", None)    # import raises
     assert "requirements-wakeword.txt" in w.engine_problem()
+
+
+def test_until_hey_auvren_is_trained_the_engine_says_so(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("WAKE_WORD", raising=False)
+    for name in ("numpy", "openwakeword", "sounddevice"):
+        monkeypatch.setitem(sys.modules, name, type(sys)(name))
+    problem = w.engine_problem()
+    assert "no trained \"Hey Auvren\" model" in problem
+    d = tmp_path / "wakeword"
+    d.mkdir()
+    for f in ("hey_auvren_v0.1.onnx", "melspectrogram.onnx", "embedding_model.onnx"):
+        (d / f).write_bytes(b"x")
+    assert w.engine_problem() is None, "a trained model dropped in the folder just works"
 
 
 def test_engine_problem_names_missing_model_files(monkeypatch, tmp_path):
@@ -95,7 +134,7 @@ def gate(**kw):
 def test_a_disabled_gate_changes_nothing():
     g, _ = gate(enabled=False)
     assert g.awake
-    assert g.on_final("Hey Jarvis what time") == ("accept", "Hey Jarvis what time")
+    assert g.on_final("Hey Auvren what time") == ("accept", "Hey Auvren what time")
     assert g.on_interim("anything") == "pass"
 
 
@@ -108,13 +147,13 @@ def test_asleep_it_ignores_what_it_hears():
 
 def test_the_wake_word_with_a_request_is_accepted_without_it():
     g, _ = gate()
-    assert g.on_final("Hey Jarvis, what time is it?") == ("accept", "what time is it?")
+    assert g.on_final("Hey Auvren, what time is it?") == ("accept", "what time is it?")
     assert g.awake
 
 
 def test_the_wake_word_alone_opens_a_window_for_the_request():
     g, clock = gate(window=8.0)
-    assert g.on_final("Hey Jarvis") == ("wake", "")
+    assert g.on_final("Hey Auvren") == ("wake", "")
     clock.t += 5
     assert g.on_final("what time is it") == ("accept", "what time is it")
     clock.t += 3.1
@@ -123,7 +162,7 @@ def test_the_wake_word_alone_opens_a_window_for_the_request():
 
 def test_speaking_keeps_the_window_open_then_a_follow_up_remains():
     g, clock = gate(window=8.0, follow_up=6.0)
-    g.on_final("hey jarvis start the build")
+    g.on_final("hey auvren start the build")
     g.hold()                           # thinking, then speaking
     clock.t += 60
     assert g.awake, "never falls asleep mid-answer"
@@ -136,7 +175,7 @@ def test_speaking_keeps_the_window_open_then_a_follow_up_remains():
 
 def test_talking_keeps_the_window_open_mid_sentence():
     g, clock = gate(window=2.0, interim_grace=4.0)
-    g.on_final("hey jarvis")
+    g.on_final("hey auvren")
     clock.t += 1.9
     assert g.on_interim("I need you to") == "pass"
     clock.t += 3.5
@@ -145,7 +184,7 @@ def test_talking_keeps_the_window_open_mid_sentence():
 
 def test_an_interim_wake_word_wakes():
     g, _ = gate()
-    assert g.on_interim("hey jarvis what") == "wake"
+    assert g.on_interim("hey auvren what") == "wake"
     assert g.awake
 
 
@@ -305,7 +344,7 @@ class FakeBrain:
 @pytest.fixture
 def awake_client(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.delenv("WAKE_WORD", raising=False)      # the default: Hey Auvren
     monkeypatch.setenv("WAKE_WINDOW_SEC", "8")
     import data_paths
     importlib.reload(data_paths)
@@ -358,7 +397,8 @@ def test_the_page_is_told_it_is_asleep_and_what_to_say(awake_client):
     ws, sock, config = _open(c)
     try:
         assert config["wake"] == {"type": "wake", "enabled": True, "awake": False,
-                                  "phrase": "Hey Jarvis"}
+                                  "phrase": "Hey Auvren"}
+        assert config["stt"] == "browser"
     finally:
         ws.__exit__(None, None, None)
 
@@ -368,7 +408,7 @@ def test_asleep_a_request_is_ignored(awake_client):
     ws, sock, _ = _open(c)
     try:
         sock.send_json({"type": "transcript", "text": "what time is it", "isFinal": True})
-        sock.send_json({"type": "transcript", "text": "hey jarvis what time is it",
+        sock.send_json({"type": "transcript", "text": "hey auvren what time is it",
                         "isFinal": True})
         seen = _until(sock, lambda m: m.get("type") == "audio")
         assert server.brain_instance.turns == ["what time is it"], \
@@ -383,7 +423,7 @@ def test_the_wake_word_alone_then_the_request(awake_client):
     c, server = awake_client
     ws, sock, _ = _open(c)
     try:
-        sock.send_json({"type": "transcript", "text": "Hey Jarvis", "isFinal": True})
+        sock.send_json({"type": "transcript", "text": "Hey Auvren", "isFinal": True})
         wake = _until(sock, lambda m: m.get("type") == "wake")[-1]
         assert wake["awake"] and wake["cue"]
         sock.send_json({"type": "transcript", "text": "open my notes", "isFinal": True})
@@ -399,7 +439,7 @@ def test_after_he_answers_a_plain_reply_is_heard(awake_client):
     server.wake_gate.window = 0.05           # so only the follow-up can hold it open
     ws, sock, _ = _open(c)
     try:
-        sock.send_json({"type": "transcript", "text": "hey jarvis start the build",
+        sock.send_json({"type": "transcript", "text": "hey auvren start the build",
                         "isFinal": True})
         audio = _until(sock, lambda m: m.get("type") == "audio")[-1]
         time.sleep(0.1)                      # the wake word's own window is long gone
@@ -418,7 +458,7 @@ def test_when_the_window_closes_the_page_is_told(awake_client):
     server.wake_gate.window = 0.2
     ws, sock, _ = _open(c)
     try:
-        sock.send_json({"type": "transcript", "text": "Hey Jarvis", "isFinal": True})
+        sock.send_json({"type": "transcript", "text": "Hey Auvren", "isFinal": True})
         assert _until(sock, lambda m: m.get("type") == "wake")[-1]["awake"] is True
         asleep = _until(sock, lambda m: m.get("type") == "wake")[-1]
         assert asleep["awake"] is False and "cue" not in asleep
@@ -436,9 +476,9 @@ def test_asleep_somebody_elses_voice_cannot_cut_him_off(awake_client, monkeypatc
     ws, sock, _ = _open(c)
     try:
         sock.send_json({"type": "interim", "text": "so anyway I told him"})
-        sock.send_json({"type": "interim", "text": "hey jarvis stop"})
+        sock.send_json({"type": "interim", "text": "hey auvren stop"})
         _until(sock, lambda m: m.get("type") == "wake")
-        assert heard == ["hey jarvis stop"]
+        assert heard == ["hey auvren stop"]
     finally:
         ws.__exit__(None, None, None)
 
@@ -459,13 +499,13 @@ def test_the_engine_wakes_him(awake_client):
 
 def test_the_engine_is_started_when_installed_and_stopped_at_shutdown(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.delenv("WAKE_WORD", raising=False)
     import server
     importlib.reload(server)
     started, stopped = [], []
 
     class Listener:
-        def __init__(self, on_wake, threshold):
+        def __init__(self, on_wake, threshold, stream_factory=None):
             self.on_wake, self.threshold = on_wake, threshold
 
         def start(self):

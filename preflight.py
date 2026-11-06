@@ -520,18 +520,42 @@ def _check_local_brain_sync() -> Check:
                  message=f"Ollama has {model} at {url}.")
 
 
-def _check_wake_word_sync() -> Check:
-    """The wake-word engine, when the wake word is on (the default).
+def _check_speech_recognition_sync() -> Check:
+    """Who turns speech into text. On this machine (stt.py) when it is
+    installed; otherwise Chrome's recogniser, which still works but sends
+    the microphone to Google and needs Chrome. A warning only when on-device
+    recognition was ASKED for (STT_ENGINE=local) and cannot run."""
+    import stt
+    chosen = stt.setting()
+    problem = stt.engine_problem()
+    if problem is None and chosen != "browser":
+        return Check(name="speech_recognition", status=STATUS_OK,
+                     message=f"Speech is recognised on this machine ({stt.model_name()}).")
+    if chosen == "local":
+        return Check(name="speech_recognition", status=STATUS_WARN, message=problem,
+                     remedy="pip install -r requirements-stt.txt, then python stt.py --setup")
+    return Check(name="speech_recognition", status=STATUS_OK,
+                 message="Chrome's recogniser is listening (STT_ENGINE=browser, or on-device "
+                         "recognition is not installed).")
 
-    A warning, not a failure: without the engine Auvren still wakes when a
-    transcript opens with the wake word — he is never deaf, only slower and
-    less sure (see wakeword.py).
+
+def _check_wake_word_sync() -> Check:
+    """The wake word, when it is on (the default).
+
+    Never a failure: without an audio engine Auvren still wakes when what
+    he hears opens with "Hey Auvren" — and with on-device recognition that is
+    the normal path until a "hey auvren" model is trained (see wakeword.py).
     """
+    import stt
     import wakeword
     if not wakeword.enabled():
         return Check(name="wake_word", status=STATUS_OK,
                      message="The wake word is off (WAKE_WORD=off): Auvren answers everything he hears.")
     problem = wakeword.engine_problem()
+    if problem and stt.mode() == "local":
+        return Check(name="wake_word", status=STATUS_OK,
+                     message=f"\"{wakeword.spoken_phrase()}\" is heard by on-device speech "
+                             "recognition (no trained wake-word model yet).")
     if problem:
         return Check(name="wake_word", status=STATUS_WARN, message=problem,
                      remedy="pip install -r requirements-wakeword.txt, then "
@@ -722,11 +746,13 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 if winplat.IS_WINDOWS:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
     _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
+                    _check_speech_recognition_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync)
 else:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
     _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
+                    _check_speech_recognition_sync,
                     _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
@@ -797,6 +823,8 @@ def _phrase_for(check: Check) -> str:
         if "FISH_API_KEY" in msg:
             return "I have no Fish Audio key"
         return "my voice isn't installed"
+    if name == "speech_recognition":
+        return "on-device speech recognition isn't installed"
     if name == "wake_word":
         return "my wake-word engine isn't installed"
     if name == "local_brain":

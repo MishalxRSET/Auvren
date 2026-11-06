@@ -1,6 +1,6 @@
-# Optional: the wake-word engine ("Hey Jarvis" until a custom "Hey Auvren" is
-# trained). Without these Auvren still wakes when a transcript starts with the
-# wake word; with them the wake word is heard locally, on this machine.
+# Optional: the openWakeWord audio engine. Needed only for a pretrained wake
+# word (WAKE_WORD=hey_jarvis) or a trained hey_auvren.onnx; "Hey Auvren" is
+# otherwise heard by speech recognition (requirements-stt.txt).
 #
 #   pip install -r requirements-wakeword.txt
 #   python wakeword.py --setup        # downloads the model files, lists mics
