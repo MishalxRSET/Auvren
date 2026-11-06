@@ -549,7 +549,7 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     names = {c.name for c in results}
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "voice", "anthropic_key_leftover", "cross_session_inbound",
+        "voice", "local_brain", "anthropic_key_leftover", "cross_session_inbound",
     }
 
 
@@ -629,3 +629,56 @@ def test_spoken_summary_says_a_missing_piper_voice_plainly():
     checks = [Check(name="voice", status=STATUS_FAIL,
                     message="Piper is not installed (no piper.exe on PATH, PIPER_PATH unset).")]
     assert "my voice isn't installed" in preflight.spoken_summary(checks)
+
+
+# --- the local brain (Ollama) -------------------------------------------------
+
+class _Resp:
+    def __init__(self, models):
+        self._models = models
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"models": [{"name": m} for m in self._models]}
+
+
+def test_local_brain_ok_when_ollama_has_the_model(monkeypatch):
+    import httpx
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: _Resp(["llama3.2:latest"]))
+    assert preflight._check_local_brain_sync().status == STATUS_OK
+
+
+def test_local_brain_says_to_pull_a_missing_model(monkeypatch):
+    import httpx
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setenv("OLLAMA_MODEL", "qwen3:4b")
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: _Resp([]))
+    check = preflight._check_local_brain_sync()
+    assert check.status == STATUS_FAIL and check.remedy == "Run: ollama pull qwen3:4b"
+    assert "my local model isn't downloaded" in preflight.spoken_summary([check])
+
+
+def test_local_brain_says_when_ollama_is_not_running(monkeypatch):
+    import httpx
+
+    def refused(url, timeout):
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setattr(httpx, "get", refused)
+    check = preflight._check_local_brain_sync()
+    assert check.status == STATUS_FAIL and "ollama.com" in check.remedy
+    assert "Ollama isn't running" in preflight.spoken_summary([check])
+
+
+def test_local_brain_check_is_quiet_with_the_claude_brain(monkeypatch):
+    import httpx
+
+    def never(*a, **k):
+        raise AssertionError("no Ollama probe with the Claude brain")
+    monkeypatch.setenv("JARVIS_BRAIN", "claude")
+    monkeypatch.setattr(httpx, "get", never)
+    assert preflight._check_local_brain_sync().status == STATUS_OK

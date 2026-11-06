@@ -6,8 +6,15 @@ import pytest_asyncio
 
 @pytest.fixture(autouse=True)
 def _never_spawn_a_real_brain(monkeypatch):
-    """server.lifespan builds the brain but must not start `claude` under test."""
+    """server.lifespan builds the brain but must not start `claude` under test.
+
+    And it builds the CLAUDE brain: the local (Ollama) brain is the default
+    for users, but the server suite was written against `Brain` and asserts
+    on it. Tests of the local brain construct `LocalBrain` themselves, or set
+    JARVIS_BRAIN=local.
+    """
     monkeypatch.setenv("JARVIS_BRAIN_AUTOSTART", "0")
+    monkeypatch.setenv("JARVIS_BRAIN", "claude")
 
 
 @pytest.fixture(autouse=True)

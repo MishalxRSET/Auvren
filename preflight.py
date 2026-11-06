@@ -488,6 +488,38 @@ def _check_voice_sync() -> Check:
     return Check(name="voice", status=STATUS_FAIL, message=problem, remedy=remedy)
 
 
+def _check_local_brain_sync() -> Check:
+    """With the local brain (the default), Ollama is up and has the model.
+
+    The brain itself keeps retrying and comes up on its own once Ollama does
+    (local_brain.LocalBrain._recover); this says, at startup, which of the two
+    is missing and what to type.
+    """
+    import httpx
+    import local_brain
+    if local_brain.brain_engine() != local_brain.BRAIN_LOCAL:
+        return Check(name="local_brain", status=STATUS_OK,
+                     message="The Claude brain is in use (JARVIS_BRAIN=claude).")
+    url = local_brain.ollama_url()
+    model = (os.getenv("OLLAMA_MODEL") or local_brain.DEFAULT_MODEL).strip()
+    try:
+        r = httpx.get(f"{url}/api/tags", timeout=3.0)
+        r.raise_for_status()
+        names = [str(m.get("name", "")) for m in r.json().get("models", [])
+                 if isinstance(m, dict)]
+    except (httpx.HTTPError, OSError, ValueError) as e:
+        return Check(name="local_brain", status=STATUS_FAIL,
+                     message=f"Ollama is not reachable at {url}: {e}",
+                     remedy="Install Ollama from ollama.com and start it, or set "
+                            "JARVIS_BRAIN=claude to use Claude Code as the brain.")
+    if not local_brain.model_present(model, names):
+        return Check(name="local_brain", status=STATUS_FAIL,
+                     message=f"Ollama does not have the model {model}.",
+                     remedy=f"Run: ollama pull {model}")
+    return Check(name="local_brain", status=STATUS_OK,
+                 message=f"Ollama has {model} at {url}.")
+
+
 def _check_anthropic_key_leftover_sync() -> Check:
     """A leftover ANTHROPIC_* var signals a misconfigured .env.
 
@@ -669,11 +701,13 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 # a warning nobody can act on.
 if winplat.IS_WINDOWS:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
-    _SYNC_CHECKS = (_check_voice_sync, _check_anthropic_key_leftover_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync,
+                    _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync)
 else:
     _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-    _SYNC_CHECKS = (_check_voice_sync, _check_anthropic_key_leftover_sync,
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync,
+                    _check_anthropic_key_leftover_sync,
                     _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -743,6 +777,10 @@ def _phrase_for(check: Check) -> str:
         if "FISH_API_KEY" in msg:
             return "I have no Fish Audio key"
         return "my voice isn't installed"
+    if name == "local_brain":
+        if "does not have the model" in msg:
+            return "my local model isn't downloaded"
+        return "Ollama isn't running"
     if name == "anthropic_key_leftover":
         return "there's a leftover Anthropic API key in the environment"
     if name == "cross_session_inbound":

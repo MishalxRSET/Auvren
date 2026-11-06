@@ -85,6 +85,8 @@ import jarvis_memory
 import notifier
 import tts
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
+import local_brain
+from local_brain import LocalBrain, LocalBrainConfig
 from speech import Priority, SpeechScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -683,6 +685,18 @@ def _action_words(text: str) -> list[str]:
     return _re.findall(r"[a-z]+", text.lower())
 
 
+def _brain_down_line(failure_reason, generic: str = "My language systems are down, sir. "
+                                                   "Check the server log.") -> str:
+    """What is said when the brain cannot answer, by why."""
+    if failure_reason == "auth":
+        return _AUTH_BRAIN_DOWN_LINE
+    if failure_reason == "ollama_down":
+        return "I can't reach Ollama, sir. Start it and I'll be with you shortly."
+    if failure_reason == "model_missing":
+        return "My local model isn't downloaded yet, sir. Pull it with Ollama and I'll be along."
+    return generic
+
+
 async def _on_brain_state(state: str, info: dict) -> None:
     if state == "failed" and info.get("failure_reason") == "auth":
         # At ERROR level, visible in the terminal the user is already
@@ -696,9 +710,11 @@ async def _on_brain_state(state: str, info: dict) -> None:
             _brain_notice_at["restarting"] = now
             await speech.say("Rebooting my language systems, one moment.", Priority.NORMAL)
     elif state == "failed":
-        line = (_AUTH_BRAIN_DOWN_LINE if info.get("failure_reason") == "auth"
-               else "My language systems are down, sir. Check the server log.")
-        await speech.say(line, Priority.URGENT, immediate=True)
+        await speech.say(_brain_down_line(info.get("failure_reason")),
+                         Priority.URGENT, immediate=True)
+    elif state == "ready" and info.get("recovered"):
+        # The local brain found Ollama (or its model) after starting without it.
+        await speech.say("My language systems are back, sir.", Priority.NORMAL)
     elif state == "rate_limited":
         await speech.say(f"I've hit the usage limit until {_fmt_reset(info.get('resets_at'))}, sir.",
                          Priority.NORMAL)
@@ -937,12 +953,19 @@ async def start_brain_and_speech() -> None:
     home = jarvis_memory.ensure_layout()
     data_paths.ensure_tool_token()
     mcp_path = _write_mcp_config(home)
-    config = BrainConfig.from_env(home)
-    config.mcp_config = mcp_path
-    # Exactly the servers `_write_mcp_config` accepted — so what is merged into
-    # the config and what the allowlist grants can never disagree.
-    config.connections = sorted(LAST_CONNECTIONS.servers)
-    brain_instance = Brain(config)
+    if local_brain.brain_engine() == local_brain.BRAIN_LOCAL:
+        # The offline brain (Ollama). Its tools run in-process through the
+        # same gate the Claude brain's MCP child reaches over HTTP.
+        brain_instance = LocalBrain(LocalBrainConfig.from_env(home), run_tool=run_tool_call)
+        log.info("brain: local (Ollama %s at %s)", brain_instance.config.model,
+                 brain_instance.config.url)
+    else:
+        config = BrainConfig.from_env(home)
+        config.mcp_config = mcp_path
+        # Exactly the servers `_write_mcp_config` accepted — so what is merged
+        # into the config and what the allowlist grants can never disagree.
+        config.connections = sorted(LAST_CONNECTIONS.servers)
+        brain_instance = Brain(config)
     brain_instance.on_state(_on_brain_state)
     # The other half of the handover: the brain reads the last real journal
     # entry itself, and asks us who is working right now. Called at spawn
@@ -1617,9 +1640,8 @@ async def _handle_utterance(text: str) -> None:
     await _voice_emit({"type": "status", "state": "thinking"})
     if not brain_instance.ready:
         if brain_instance.failed:
-            line = (_AUTH_BRAIN_DOWN_LINE
-                    if getattr(brain_instance, "failure_reason", None) == "auth"
-                    else "My language systems are down, sir.")
+            line = _brain_down_line(getattr(brain_instance, "failure_reason", None),
+                                    generic="My language systems are down, sir.")
         else:
             line = "One moment, sir — my language systems are still starting."
         await speech.say(line, Priority.NORMAL)
@@ -2569,7 +2591,19 @@ async def internal_tool(request: Request):
     args = body.get("arguments") or {}
     if not isinstance(args, dict):
         return _tool_reply(False, "Arguments must be an object.")
+    return await run_tool_call(tool, args)
 
+
+async def run_tool_call(tool: str, args: dict) -> dict:
+    """Run one tool for whichever brain is running, behind every gate.
+
+    The Claude brain arrives here through `/internal/tool` (its MCP child,
+    over loopback, bearing the token); the local brain calls this directly,
+    in-process. Either way the gates below read the running brain's own
+    `current_origin` and taint, so there is one rule set, not two.
+    """
+    if not isinstance(args, dict):
+        return _tool_reply(False, "Arguments must be an object.")
     handler = TOOL_HANDLERS.get(tool)
     if handler is None:
         return _tool_reply(False, f"Unknown tool: {tool}")

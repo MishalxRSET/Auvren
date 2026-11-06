@@ -4,9 +4,10 @@
 Auvren is a voice-first AI assistant for **Windows**, in the style of JARVIS.
 It began as `ethanplusai/jarvis` (macOS) and is being rebuilt for Windows and
 merged with an offline design (local Ollama brain, Piper voice, wake word —
-the owner's "Auvren Build Plan"). Today it runs locally, speaks with Piper,
-and drives Claude Code for development tasks — every execution recorded as a
-*run* and watchable at `/dashboard`.
+the owner's "Auvren Build Plan"). Today it runs locally, thinks with a local
+model under Ollama (or, with `JARVIS_BRAIN=claude`, a Claude Code process),
+speaks with Piper, and hands development tasks to Claude Code — every
+execution recorded as a *run* and watchable at `/dashboard`.
 
 Internal identifiers still say jarvis — module names (`jarvis_mcp.py`,
 `jarvis_memory.py`), `JARVIS_*` environment variables, the data layout — so
@@ -30,9 +31,11 @@ Accessibility and Terminal.app sections do not apply on Windows.
 
 When a user clones this repo and starts Claude Code, help them:
 1. Copy .env.example to .env
-2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-   newer) and log in with `claude` — Auvren's brain runs on your Claude
-   subscription, not on an API key
+2. Install Ollama (ollama.com) and pull the brain's model:
+   `ollama pull qwen3:4b` (or set `OLLAMA_MODEL`). Then install Claude Code
+   (2.1.224 or newer) and log in with `claude` — coding runs, and the brain
+   too with `JARVIS_BRAIN=claude`, use your Claude subscription, not an API
+   key
 3. Install the voice (Piper, offline, free):
    `powershell -ExecutionPolicy Bypass -File scripts\get_piper.ps1`
    — it downloads piper.exe and the en_GB-alan-medium voice into
@@ -70,8 +73,19 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Backend**: FastAPI + Python (server.py, ~5800 lines)
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
-- **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
-  the user's subscription; no Anthropic API calls on the voice path
+- **AI**: one of two brains, chosen by `JARVIS_BRAIN`:
+  - `local` (default) — `local_brain.py`: a local model under Ollama
+    (`qwen3:4b` by default), streamed from `/api/chat` over `httpx`. Its
+    tools run IN-PROCESS through `server.run_tool_call`, the same gate
+    `/internal/tool` uses, so origin/taint/memory-writer rules apply
+    unchanged. It is offered only `local_brain.LOCAL_TOOLS` (enforced in
+    the brain, not just the prompt), and `CONFIRM_TOOLS` (`spawn_run`,
+    `cancel_run`, `create_project`) are never run on the turn the model
+    asks: code reads the exact arguments back and the next utterance must
+    be a plain yes. Coding work goes to Claude Code via `spawn_run`.
+  - `claude` — `brain.py`: a long-lived Claude Code process (Sonnet by
+    default) on the user's subscription; no Anthropic API calls on the voice
+    path
 - **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
   on stdin, WAV out); Fish Audio optional (`tts.py`)
 - **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
@@ -114,8 +128,13 @@ arbitrary LLM and file content, so everything goes through
 
 ## Key Files
 - `server.py` — Main server, WebSocket handler, HTTP API, action system
-- `brain.py` — The voice brain: one long-lived `claude -p` process on the
-  user's Claude subscription, fed over stdin as stream-json
+- `local_brain.py` — The default brain: a local Ollama model, the tool
+  allowlist, spoken confirmation for consequential tools, auto-recovery
+  when Ollama comes up late. Drop-in for `Brain` as far as server.py is
+  concerned (same turn/ready/origin/taint surface)
+- `brain.py` — The Claude brain (`JARVIS_BRAIN=claude`): one long-lived
+  `claude -p` process on the user's Claude subscription, fed over stdin as
+  stream-json
 - `jarvis_mcp.py` — Stdio MCP server exposing JARVIS's tools to the brain;
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
@@ -154,8 +173,9 @@ arbitrary LLM and file content, so everything goes through
   user can read and edit directly, not a database
 - `usage_store.py` — Tracks the subscription's five-hour / seven-day
   rate-limit usage (there is no spend to report — see brain.py)
-- `preflight.py` — First-run environment checks: `claude` CLI/login,
-  Accessibility, Fish key, cross-session steering
+- `preflight.py` — First-run environment checks: Ollama and its model (local
+  brain), `claude` CLI/login, the voice, cross-session steering (and the
+  macOS-only Accessibility/Screen Recording checks off Windows)
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
 - `actions.py` — System actions: Windows Terminal (PowerShell fallback),
@@ -197,8 +217,15 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   never bill an API key instead, and `preflight.py`'s `anthropic_key_leftover`
   check warns you if one is sitting in your `.env` — that is the only place
   the name appears in live code.
-- `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the brain,
-  always passed explicitly as `--model`
+- `JARVIS_BRAIN` (optional, default `local`) — `local` (Ollama) or `claude`.
+  The test suite pins `claude` in `tests/conftest.py`, so no test talks to a
+  real Ollama; local-brain tests build `LocalBrain` against a fake one
+- `OLLAMA_MODEL` (default `qwen3:4b`), `OLLAMA_HOST` (default
+  `127.0.0.1:11434`; a bind-all `0.0.0.0` is dialled as loopback),
+  `OLLAMA_NUM_CTX` (8192), `OLLAMA_KEEP_ALIVE` (`30m`) — the local brain
+- `HONORIFIC` (optional, default `sir`) — how Auvren addresses the user
+- `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the Claude
+  brain, always passed explicitly as `--model`
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo

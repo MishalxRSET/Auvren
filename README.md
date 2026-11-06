@@ -4,7 +4,8 @@
 
 > Auvren began as [`ethanplusai/jarvis`](https://github.com/ethanplusai/jarvis),
 > a macOS project, and is being rebuilt for **Windows**. What works today:
-> voice (Piper, offline), the run pipeline, session watching, the dashboard,
+> a local brain (Ollama, offline) that hands coding to Claude Code, voice
+> (Piper, offline), the run pipeline, session watching, the dashboard,
 > opening Windows Terminal / Chrome / VS Code, and toast notifications. Not
 > yet on Windows: looking at the screen, answering a session's permission
 > prompt by keystroke, and messaging another session — those say so out loud.
@@ -160,6 +161,9 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
   because `cmd.exe` would re-parse the brain's prompt; if that is what you
   have, point `JARVIS_CLAUDE_PATH` at a `claude.exe`.
 - **Python 3.11+** and **Node.js 18+**.
+- **Ollama** for the brain ([ollama.com](https://ollama.com)), with a model
+  that supports tool calling: `ollama pull qwen3:4b`. Prefer Claude Code as
+  the brain instead? Set `JARVIS_BRAIN=claude` and skip Ollama.
 - **Piper** for the voice — one script installs it (below).
 - **Windows Terminal** is used when present; otherwise a PowerShell window.
 
@@ -179,7 +183,16 @@ python -m playwright install chromium    # for read_page / look_at_page
 cd frontend; npm install; cd ..
 
 powershell -ExecutionPolicy Bypass -File scripts\get_piper.ps1
+
+ollama pull qwen3:4b
 ```
+
+**The brain.** By default Auvren thinks with that local model: it answers
+on its own and hands coding work to Claude Code as a recorded run. Starting a
+run, stopping one or creating a project is always read back to you first —
+"Shall I start Claude Code in sitearc, to fix the login bug?" — and happens
+only when you say yes. If Ollama is not running when the server starts,
+Auvren says so and comes up by itself once it is.
 
 `get_piper.ps1` downloads `piper.exe` and one voice (`en_GB-alan-medium`, a
 British male voice; pass `-Voice en_US-ryan-high` or any name from the
