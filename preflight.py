@@ -39,6 +39,8 @@ from typing import Optional
 
 import claude_env
 import screen
+import tts
+import winplat
 
 log = logging.getLogger("jarvis.preflight")
 
@@ -133,6 +135,25 @@ def _parse_version(text: str) -> Optional[tuple[int, int, int]]:
 
 # ── individual checks ────────────────────────────────────────────────────
 
+def _launchable(claude: str, name: str) -> tuple[list[str], Optional[Check]]:
+    """The argv the brain will actually exec, or the Check explaining why not.
+
+    On Windows `claude` on PATH is usually npm's `claude.cmd`, which the brain
+    refuses to exec (see winplat.claude_argv). Resolving it HERE, the same
+    way, means a launcher the brain cannot use fails at startup with a
+    remedy, instead of on the first thing the user says.
+    """
+    override = os.getenv("JARVIS_CLAUDE_PATH") or None
+    if not winplat.IS_WINDOWS and not override:
+        return [claude], None
+    try:
+        return winplat.claude_argv(override or claude), None
+    except winplat.ClaudeLaunchError as e:
+        return [], Check(name=name, status=STATUS_FAIL, message=str(e),
+                         remedy="Install the native Claude Code build "
+                                "(irm https://claude.ai/install.ps1 | iex), or "
+                                "set JARVIS_CLAUDE_PATH to claude.exe.")
+
 async def _check_claude_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     """`claude` is on PATH and is at least MIN_CLAUDE_VERSION."""
     claude = shutil.which("claude")
@@ -147,7 +168,10 @@ async def _check_claude_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
             ),
         )
 
-    rc, stdout, stderr = await _run_subprocess(claude, "--version", timeout=timeout)
+    launch, problem = _launchable(claude, "claude_cli")
+    if problem:
+        return problem
+    rc, stdout, stderr = await _run_subprocess(*launch, "--version", timeout=timeout)
     if rc != 0:
         return Check(
             name="claude_cli",
@@ -283,7 +307,10 @@ async def _check_claude_login(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     config_dir = _config_dir_from_env(env)
     where = f"config dir: {config_dir}"
 
-    rc, stdout, stderr = await _run_subprocess(claude, "auth", "status", timeout=timeout, env=env)
+    launch, problem = _launchable(claude, "claude_login")
+    if problem:
+        return problem
+    rc, stdout, stderr = await _run_subprocess(*launch, "auth", "status", timeout=timeout, env=env)
     if rc != 0:
         return Check(
             name="claude_login",
@@ -439,16 +466,102 @@ def _check_screen_recording_sync() -> Check:
     )
 
 
-def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
-        return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
-    return Check(
-        name="fish_api_key",
-        status=STATUS_FAIL,
-        message="FISH_API_KEY is not set.",
-        remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
-    )
+def _check_voice_sync() -> Check:
+    """The selected TTS engine can speak, or Auvren has no voice.
+
+    Piper (the default) needs piper.exe and one voice; Fish needs its key.
+    See tts.py for how the engine is chosen.
+    """
+    engine = tts.engine()
+    problem = tts.voice_problem()
+    if problem is None:
+        if engine == tts.ENGINE_PIPER:
+            return Check(name="voice", status=STATUS_OK,
+                         message=f"Piper voice {Path(tts.piper_model()).stem} is ready.")
+        return Check(name="voice", status=STATUS_OK, message="Fish Audio key is set.")
+    if engine == tts.ENGINE_FISH:
+        remedy = ("Get a Fish Audio API key from fish.audio and set FISH_API_KEY "
+                  "in .env, or remove TTS_ENGINE=fish to use Piper (free, offline).")
+    else:
+        remedy = ("Run scripts\\get_piper.ps1 to install Piper and a voice, or set "
+                  "PIPER_PATH and PIPER_MODEL in .env.")
+    return Check(name="voice", status=STATUS_FAIL, message=problem, remedy=remedy)
+
+
+def _check_local_brain_sync() -> Check:
+    """With the local brain (the default), Ollama is up and has the model.
+
+    The brain itself keeps retrying and comes up on its own once Ollama does
+    (local_brain.LocalBrain._recover); this says, at startup, which of the two
+    is missing and what to type.
+    """
+    import httpx
+    import local_brain
+    if local_brain.brain_engine() != local_brain.BRAIN_LOCAL:
+        return Check(name="local_brain", status=STATUS_OK,
+                     message="The Claude brain is in use (JARVIS_BRAIN=claude).")
+    url = local_brain.ollama_url()
+    model = (os.getenv("OLLAMA_MODEL") or local_brain.DEFAULT_MODEL).strip()
+    try:
+        r = httpx.get(f"{url}/api/tags", timeout=3.0)
+        r.raise_for_status()
+        names = [str(m.get("name", "")) for m in r.json().get("models", [])
+                 if isinstance(m, dict)]
+    except (httpx.HTTPError, OSError, ValueError) as e:
+        return Check(name="local_brain", status=STATUS_FAIL,
+                     message=f"Ollama is not reachable at {url}: {e}",
+                     remedy="Install Ollama from ollama.com and start it, or set "
+                            "JARVIS_BRAIN=claude to use Claude Code as the brain.")
+    if not local_brain.model_present(model, names):
+        return Check(name="local_brain", status=STATUS_FAIL,
+                     message=f"Ollama does not have the model {model}.",
+                     remedy=f"Run: ollama pull {model}")
+    return Check(name="local_brain", status=STATUS_OK,
+                 message=f"Ollama has {model} at {url}.")
+
+
+def _check_speech_recognition_sync() -> Check:
+    """Who turns speech into text. On this machine (stt.py) when it is
+    installed; otherwise Chrome's recogniser, which still works but sends
+    the microphone to Google and needs Chrome. A warning only when on-device
+    recognition was ASKED for (STT_ENGINE=local) and cannot run."""
+    import stt
+    chosen = stt.setting()
+    problem = stt.engine_problem()
+    if problem is None and chosen != "browser":
+        return Check(name="speech_recognition", status=STATUS_OK,
+                     message=f"Speech is recognised on this machine ({stt.model_name()}).")
+    if chosen == "local":
+        return Check(name="speech_recognition", status=STATUS_WARN, message=problem,
+                     remedy="pip install -r requirements-stt.txt, then python stt.py --setup")
+    return Check(name="speech_recognition", status=STATUS_OK,
+                 message="Chrome's recogniser is listening (STT_ENGINE=browser, or on-device "
+                         "recognition is not installed).")
+
+
+def _check_wake_word_sync() -> Check:
+    """The wake word, when it is on (the default).
+
+    Never a failure: without an audio engine Auvren still wakes when what
+    he hears opens with "Hey Auvren" — and with on-device recognition that is
+    the normal path until a "hey auvren" model is trained (see wakeword.py).
+    """
+    import stt
+    import wakeword
+    if not wakeword.enabled():
+        return Check(name="wake_word", status=STATUS_OK,
+                     message="The wake word is off (WAKE_WORD=off): Auvren answers everything he hears.")
+    problem = wakeword.engine_problem()
+    if problem and stt.mode() == "local":
+        return Check(name="wake_word", status=STATUS_OK,
+                     message=f"\"{wakeword.spoken_phrase()}\" is heard by on-device speech "
+                             "recognition (no trained wake-word model yet).")
+    if problem:
+        return Check(name="wake_word", status=STATUS_WARN, message=problem,
+                     remedy="pip install -r requirements-wakeword.txt, then "
+                            "python wakeword.py --setup")
+    return Check(name="wake_word", status=STATUS_OK,
+                 message=f"The wake word is ready: \"{wakeword.spoken_phrase()}\".")
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
@@ -626,9 +739,22 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 
 # ── running them all ─────────────────────────────────────────────────────
 
-_ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-_SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
-                _check_cross_session_inbound_sync, _check_screen_recording_sync)
+# Accessibility and Screen Recording are macOS permissions, and the features
+# they guard (answering a dialog, seeing the screen) are phase 2 of the
+# Windows port. On Windows they are not run at all, rather than reported as
+# a warning nobody can act on.
+if winplat.IS_WINDOWS:
+    _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login)
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
+                    _check_speech_recognition_sync,
+                    _check_anthropic_key_leftover_sync,
+                    _check_cross_session_inbound_sync)
+else:
+    _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
+    _SYNC_CHECKS = (_check_voice_sync, _check_local_brain_sync, _check_wake_word_sync,
+                    _check_speech_recognition_sync,
+                    _check_anthropic_key_leftover_sync,
+                    _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
 async def _run_one(fn, *, is_async: bool, timeout: float) -> Check:
@@ -693,8 +819,18 @@ def _phrase_for(check: Check) -> str:
         if "not been granted" in msg:
             return "I don't have Screen Recording permission"
         return "Screen Recording couldn't be checked"
-    if name == "fish_api_key":
-        return "I have no Fish Audio key"
+    if name == "voice":
+        if "FISH_API_KEY" in msg:
+            return "I have no Fish Audio key"
+        return "my voice isn't installed"
+    if name == "speech_recognition":
+        return "on-device speech recognition isn't installed"
+    if name == "wake_word":
+        return "my wake-word engine isn't installed"
+    if name == "local_brain":
+        if "does not have the model" in msg:
+            return "my local model isn't downloaded"
+        return "Ollama isn't running"
     if name == "anthropic_key_leftover":
         return "there's a leftover Anthropic API key in the environment"
     if name == "cross_session_inbound":

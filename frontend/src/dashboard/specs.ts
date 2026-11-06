@@ -1,11 +1,11 @@
 /**
- * The SPECS view — where a human reads what JARVIS proposes and what JARVIS
+ * The SPECS view — where a human reads what Auvren proposes and what Auvren
  * produced, and answers out loud.
  *
  * The user's words, and the whole brief:
  *
- *   "JARVIS needs to open a clean/simple UI for specs and plans for people to
- *    actually see it and communicate feedback to JARVIS by voice."
+ *   "Auvren needs to open a clean/simple UI for specs and plans for people to
+ *    actually see it and communicate feedback to Auvren by voice."
  *   "you go do it, and then you report back when it's done, you pull it up
  *    for them so it's easy for them to review"
  *
@@ -19,12 +19,12 @@
  * 1. THE NUMBERS ARE THE INTERFACE. Every top-level section is rendered with
  *    a large, unmissable number, so the user can say "change three", "drop
  *    five", "approved" and be understood. Those numbers are computed once, in
- *    `specs.py`, and reach JARVIS through `review_document` unchanged. This
+ *    `specs.py`, and reach Auvren through `review_document` unchanged. This
  *    file must therefore never renumber, reorder, filter or collapse
  *    sections: whatever it draws out of order stops being an address.
  *
  * 2. THE PAGE IS FOR READING. There is no comment box, no editor, no inline
- *    edit and no approve button. The user talks, JARVIS revises the file or
+ *    edit and no approve button. The user talks, Auvren revises the file or
  *    records the approval, and the page notices the file changed. The only
  *    control on it is which document you are looking at.
  *
@@ -76,7 +76,7 @@ const PROJECT_STATE: Record<ReviewState, StateCopy> = {
   },
   planning: {
     tone: "accent", label: "planning",
-    line: "Approved. JARVIS is writing the plan.",
+    line: "Approved. Auvren is writing the plan.",
   },
   building: {
     tone: "accent", label: "building",
@@ -91,7 +91,7 @@ const PROJECT_STATE: Record<ReviewState, StateCopy> = {
 const APPROVAL: Record<ApprovalState, StateCopy> = {
   awaiting: {
     tone: "warn", label: "awaiting approval",
-    line: "Nobody has approved this yet. Read it, then tell JARVIS "
+    line: "Nobody has approved this yet. Read it, then tell Auvren "
         + "“approved” — or name a section to change.",
   },
   approved: {
@@ -202,7 +202,7 @@ function documentRow(project: SpecProject, doc: SpecDocumentMeta): HTMLElement {
  *
  * Both states count. "Awaiting approval" and "finished, waiting to be
  * reviewed" are the same ask — a person has to look at something — and this
- * tab exists for exactly that ask. Anything mid-flight is JARVIS's problem,
+ * tab exists for exactly that ask. Anything mid-flight is Auvren's problem,
  * not the user's, and is not counted.
  */
 function paintBadge(): void {
@@ -225,7 +225,7 @@ function paintMaster(): void {
 
   if (projects.length === 0) {
     list.append(emptyState(
-      "Nothing to review yet. Talk an idea through with JARVIS and the "
+      "Nothing to review yet. Talk an idea through with Auvren and the "
       + "design he writes down will appear here."));
   } else {
     for (const project of projects) list.append(projectRow(project));
@@ -337,7 +337,7 @@ function paintDetail(doc: SpecDocument | null, message?: string): void {
     title.textContent = "Document";
     if (meta) meta.textContent = "";
     body.replaceChildren(emptyState(
-      message ?? "Pick a project on the left to read what JARVIS wrote."));
+      message ?? "Pick a project on the left to read what Auvren wrote."));
     return;
   }
 
@@ -425,7 +425,7 @@ async function loadDocument(): Promise<void> {
     }
     paintDetail(null,
       "Could not read that document. It may have been moved or renamed on "
-      + "disk — JARVIS rewrites these files as you talk.");
+      + "disk — Auvren rewrites these files as you talk.");
   }
 }
 
@@ -442,7 +442,7 @@ async function reconcile(): Promise<void> {
       return;
     }
     console.error("[specs] reconcile failed", e);
-    showBanner("Cannot reach the JARVIS server.");
+    showBanner("Cannot reach the Auvren server.");
     return;
   }
 
@@ -474,13 +474,13 @@ export function initSpecs(): void {
   if (started) return;
   started = true;
   void reconcile();
-  // A spec is revised by JARVIS writing to disk and an approval is a file
+  // A spec is revised by Auvren writing to disk and an approval is a file
   // appearing beside it, so the socket only ever says "something moved" and
   // the truth is re-read from /api/specs.
   connectSpecsLive({
     onReconcile: () => void reconcile(),
     onConnectionChange: (connected) => {
-      if (!connected) showBanner("Reconnecting to JARVIS…");
+      if (!connected) showBanner("Reconnecting to Auvren…");
     },
   });
 }

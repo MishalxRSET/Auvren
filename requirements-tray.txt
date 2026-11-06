@@ -1,0 +1,7 @@
+# Optional: Auvren's icon in the Windows notification area (system tray) --
+# his state at a glance, and a menu: Open, Dashboard, Listen now, Mute,
+# Start with Windows, Show log, Quit. Shown automatically once installed.
+#
+#   pip install -r requirements-tray.txt
+pystray==0.19.5
+Pillow>=10

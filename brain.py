@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import claude_env
+import winplat
 import usage_store
 
 log = logging.getLogger("jarvis.brain")
@@ -742,7 +742,7 @@ class Brain:
 
     def command(self) -> list[str]:
         c = self.config
-        cmd = shlex.split(self._claude) + [
+        cmd = winplat.claude_argv(self._claude) + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages",
             "--model", c.model, "--effort", c.effort, "--name", "jarvis",
@@ -889,6 +889,10 @@ class Brain:
 
     @staticmethod
     def _kill(proc: asyncio.subprocess.Process) -> None:
+        # On Windows kill() ends the parent only; the brain's MCP child and
+        # any shell it started would be orphaned (winplat, fact 3).
+        if winplat.kill_tree(proc.pid):
+            return
         try:
             proc.kill()
         except ProcessLookupError:

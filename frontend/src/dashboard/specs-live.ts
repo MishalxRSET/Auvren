@@ -2,7 +2,7 @@
  * Live hints for the SPECS view.
  *
  * Same discipline as live.ts and sessions-live.ts, and stricter: the message
- * carries no content whatsoever. A spec is revised by JARVIS writing to
+ * carries no content whatsoever. A spec is revised by Auvren writing to
  * disk, and an approval is a file appearing beside it — there is nothing to
  * push, so the server watches the files and says only that something moved.
  * Every message means one thing: reconcile against /api/specs.

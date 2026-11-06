@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>JARVIS · Design Reference</title>
+    <title>Auvren · Design Reference</title>
 
     <!-- The real stylesheet, loaded relatively so this page can be opened
          straight off disk with no server and can never drift from what
@@ -60,7 +60,7 @@
     <header class="shell-head">
       <div class="shell-head-top">
         <div class="brand">
-          <span class="brand-mark">JARVIS</span>
+          <span class="brand-mark">Auvren</span>
           <span class="brand-sub">Design Reference</span>
         </div>
         <div class="link-state tone-ok">
@@ -151,7 +151,7 @@
         <h2 class="pv-title">The masthead readout</h2>
       </div>
       <p class="pv-note">
-        JARVIS runs on your Claude subscription, so the number that matters is
+        Auvren runs on your Claude subscription, so the number that matters is
         how much of the five-hour and seven-day windows is gone — not a dollar
         figure for API calls nobody made. The gauges are the hero; what is
         running now and what ran today sit beside them.
@@ -366,7 +366,7 @@
                       <div class="stat-zone-head">
                         <span class="stat-zone-title">Subscription</span>
                         <span class="pill tone-warn">no reading</span>
-                        <span class="stat-zone-note">nothing measured since JARVIS started</span>
+                        <span class="stat-zone-note">nothing measured since Auvren started</span>
                       </div>
                       <div class="usage-gauges">
                         <div class="usage-gauge">
@@ -1190,7 +1190,7 @@
                 <p class="callout-body">permission prompt</p>
                 <div class="callout-foot">
                   <span class="pill tone-bad">your keystroke</span>
-                  <span class="callout-note">JARVIS cannot answer this one — it wants a key pressed in that terminal.</span>
+                  <span class="callout-note">Auvren cannot answer this one — it wants a key pressed in that terminal.</span>
                 </div>
               </div>
               <section class="panel">
@@ -1847,7 +1847,7 @@
       </div>
       <p class="pv-note">
         The same row, doing a third job. The latest handover gets an accent
-        frame because it is the one document JARVIS actually reloads every
+        frame because it is the one document Auvren actually reloads every
         conversation.
       </p>
 
@@ -1917,7 +1917,7 @@ their own layout.</pre>
           </header>
           <div class="panel-body">
             <div class="memory-hint">
-              Plain Markdown on disk. Edit it directly — JARVIS reads it fresh
+              Plain Markdown on disk. Edit it directly — Auvren reads it fresh
               every conversation.
             </div>
             <div class="memory-path-row">
@@ -1985,7 +1985,7 @@ their own layout.</pre>
         <section class="panel">
           <header class="panel-head"><h2 class="panel-title">Empty states</h2></header>
           <div class="panel-body">
-            <div class="empty">No runs yet. Ask JARVIS to build something.</div>
+            <div class="empty">No runs yet. Ask Auvren to build something.</div>
             <div style="height: var(--sp-3)"></div>
             <div class="empty empty--sm">Nothing but fresh sessions.</div>
           </div>
@@ -2279,11 +2279,11 @@ Top level: folders app/, migrations/, tests/; files README.md, pyproject.toml</p
         <h2 class="pv-title">Specs — the review surface</h2>
       </div>
       <p class="pv-note">
-        Where a person reads what JARVIS proposes and what JARVIS produced,
+        Where a person reads what Auvren proposes and what Auvren produced,
         and answers out loud. Not a spec viewer: one surface with two states,
         a document <em>awaiting approval</em> and finished work
         <em>awaiting review</em>. The big numbers beside the sections are the
-        interface — the user says “change three”, and JARVIS resolves that
+        interface — the user says “change three”, and Auvren resolves that
         against the same numbering, because both sides read it out of one
         function in <code>specs.py</code>. There is no comment box, no
         editor and no approve button anywhere below: the page is for reading,
@@ -2388,7 +2388,7 @@ Top level: folders app/, migrations/, tests/; files README.md, pyproject.toml</p
                   <span class="pill tone-warn">awaiting approval</span>
                 </div>
                 <p class="specs-band-line">
-                  Nobody has approved this yet. Read it, then tell JARVIS
+                  Nobody has approved this yet. Read it, then tell Auvren
                   “approved” — or name a section to change.
                 </p>
               </div>
@@ -2402,7 +2402,7 @@ Top level: folders app/, migrations/, tests/; files README.md, pyproject.toml</p
               <div class="md specs-preamble">
                 <blockquote class="md-quote">
                   <p class="md-p">
-                    Written by JARVIS from the conversation in which this was
+                    Written by Auvren from the conversation in which this was
                     agreed. It is the build’s source of truth.
                   </p>
                 </blockquote>
@@ -2647,7 +2647,7 @@ POST /api/claude-files</code></pre>
               </header>
               <div class="panel-body">
                 <div class="empty">
-                  Nothing to review yet. Talk an idea through with JARVIS and
+                  Nothing to review yet. Talk an idea through with Auvren and
                   the design he writes down will appear here.
                 </div>
               </div>
@@ -2658,7 +2658,7 @@ POST /api/claude-files</code></pre>
               </header>
               <div class="panel-body specs-doc">
                 <div class="empty">
-                  Pick a project on the left to read what JARVIS wrote.
+                  Pick a project on the left to read what Auvren wrote.
                 </div>
               </div>
             </section>
@@ -2677,16 +2677,16 @@ POST /api/claude-files</code></pre>
         Three independent sources feed this view: the subscription's windows
         (from the CLI's <code>rate_limit_event</code>, which only arrives
         while a turn is running), the transcript scan
-        (<code>usage_scan.py</code>), and JARVIS's own run log. Each can be
+        (<code>usage_scan.py</code>), and Auvren's own run log. Each can be
         absent on its own, so each panel says what it does not know in words
         rather than borrowing another's confidence. <strong>The unit is not
-        dollars</strong> — JARVIS runs on the subscription and bills nobody,
+        dollars</strong> — Auvren runs on the subscription and bills nobody,
         so a cost figure is a price list for calls that never happened. The
         one on the page is a footnote in the last panel, labelled as an API
         equivalent.
       </p>
 
-      <!-- STATE 1 — nothing measured. The state a fresh JARVIS is in, and
+      <!-- STATE 1 — nothing measured. The state a fresh Auvren is in, and
            the one an empty gauge would lie about. -->
       <div class="pv-cell">
         <span class="pv-cap">State 1 · nothing measured yet</span>
@@ -2698,7 +2698,7 @@ POST /api/claude-files</code></pre>
             <div class="usage-note">
               <span class="pill tone-warn">no reading</span>
               <span>
-                JARVIS only learns where the windows stand while a turn is
+                Auvren only learns where the windows stand while a turn is
                 running, and none has run since he started. Nothing has been
                 measured — which is not the same as nothing being used.
               </span>
@@ -3100,7 +3100,7 @@ POST /api/claude-files</code></pre>
                     <span class="row-sub">chitauri</span>
                   </span>
                   <span class="row-trail">
-                    <span class="pill pill--ghost tone-idle">JARVIS's own</span>
+                    <span class="pill pill--ghost tone-idle">Auvren's own</span>
                     <span class="row-meta is-strong" style="--w: 78px">2.1M tok</span>
                     <span class="row-meta" style="--w: 58px">12 turns</span>
                     <span class="row-meta" style="--w: 62px">9:46pm</span>
@@ -3131,16 +3131,16 @@ POST /api/claude-files</code></pre>
         </div>
       </div>
 
-      <!-- JARVIS'S OWN WORK — quiet panel, and the page's only dollar. -->
+      <!-- Auvren'S OWN WORK — quiet panel, and the page's only dollar. -->
       <div class="pv-cell">
-        <span class="pv-cap">JARVIS's own work · kept out of the figures above</span>
+        <span class="pv-cap">Auvren's own work · kept out of the figures above</span>
         <section class="panel panel--quiet">
           <header class="panel-head">
-            <h2 class="panel-title">JARVIS's Own Work</h2>
+            <h2 class="panel-title">Auvren's Own Work</h2>
           </header>
           <div class="panel-body">
             <div class="usage-note">
-              JARVIS's brain and the one-shot runs he spawns register as
+              Auvren's brain and the one-shot runs he spawns register as
               Claude Code sessions like any other, and were once counted as
               the user's conversations — 12 became 16. They are kept here so
               they are visible without being mixed into the figures above.
@@ -3169,7 +3169,7 @@ POST /api/claude-files</code></pre>
             </div>
             <div class="usage-footnote">
               The CLI priced today's runs at $2.14 — that is what these tokens
-              WOULD have cost through the API. Nothing was billed: JARVIS runs
+              WOULD have cost through the API. Nothing was billed: Auvren runs
               on the subscription and the brain scrubs every ANTHROPIC_*
               variable so the CLI cannot reach a key. Treat it as a sense of
               scale, not a bill.
@@ -3223,7 +3223,7 @@ POST /api/claude-files</code></pre>
 
     <!-- A fixed banner, exactly as the app renders it. -->
     <div class="banner tone-warn">
-      <span class="dot dot--live tone-warn"></span>Reconnecting to JARVIS…
+      <span class="dot dot--live tone-warn"></span>Reconnecting to Auvren…
     </div>
   </body>
 </html>

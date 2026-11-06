@@ -70,7 +70,9 @@ def _drain_until(ws, predicate, limit=10):
 def test_connect_sends_config_and_idle(client):
     c, server = client
     with c.websocket_connect("/ws/voice") as ws:
-        assert ws.receive_json() == {"type": "config", "muteMicDuringSpeech": False}
+        config = ws.receive_json()
+        assert config["type"] == "config" and config["muteMicDuringSpeech"] is False
+        assert config["wake"]["enabled"] is False, "the suite runs with WAKE_WORD=off"
         assert ws.receive_json() == {"type": "status", "state": "idle"}
 
 

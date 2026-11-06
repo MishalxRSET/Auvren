@@ -14,10 +14,10 @@ import inspect
 import json
 import logging
 import os
+import signal
 import difflib
 import re
 import secrets
-import shlex
 import sys
 import sqlite3
 import threading
@@ -86,6 +86,12 @@ import jarvis_memory
 import notifier
 import tts
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
+import local_brain
+from local_brain import LocalBrain, LocalBrainConfig
+import mic
+import stt
+import tray
+import wakeword
 from speech import Priority, SpeechScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -334,8 +340,6 @@ STT_CORRECTIONS = {
     r"\bclod code\b": "Claude Code",
     r"\bcloud\b": "Claude",
     r"\bquad\b": "Claude",
-    r"\btravis\b": "JARVIS",
-    r"\bjarves\b": "JARVIS",
 }
 
 
@@ -457,39 +461,26 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS — Piper (offline, default) or Fish Audio; see tts.py
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
+    """One whole utterance as audio, with whichever engine is selected."""
+    problem = tts.voice_problem()
+    if problem:
+        log.warning(f"TTS unavailable: {problem}")
         return None
-
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
+        r = await tts.synthesize(text, fish_api_key=FISH_API_KEY,
+                                 fish_voice_id=FISH_VOICE_ID)
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None
+    if r is None:
+        return None
+    _session_tokens["tts_calls"] += 1
+    _append_usage_entry(0, 0, "tts")
+    return r.audio
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +579,468 @@ def _drop_voice_client(ws) -> None:
         speech.transport_gone()
 
 
+# ---------------------------------------------------------------------------
+# The wake word: Auvren is asleep until addressed (see wakeword.py)
+# ---------------------------------------------------------------------------
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+wake_gate = wakeword.WakeGate(
+    enabled=wakeword.enabled(),
+    window=_float_env("WAKE_WINDOW_SEC", 8.0),
+    follow_up=_float_env("WAKE_FOLLOW_UP_SEC", 8.0))
+wake_listener: Optional[wakeword.WakeListener] = None
+_wake_sleep_timer: Optional[asyncio.TimerHandle] = None
+
+# Who turns speech into text: "local" (stt.py, on this machine) or "browser"
+# (Chrome's recogniser). Decided at import; falls back to "browser" if the
+# on-device ears will not start.
+STT_MODE = stt.mode()
+mic_hub: Optional[mic.MicHub] = None
+local_ears: Optional[stt.LocalEars] = None
+_mic_muted = False
+_auvren_speaking = False
+
+# The tray icon (tray.py), and what it shows.
+tray_icon: Optional[tray.Tray] = None
+_last_status_state = "idle"
+_brain_down: Optional[str] = None
+_WAKE_HOLDING_STATES = ("thinking", "speaking", "compacting")
+
+
+def _wake_frame() -> dict:
+    return {"type": "wake", "enabled": wake_gate.enabled, "awake": wake_gate.awake,
+            "phrase": wakeword.spoken_phrase()}
+
+
+def _wake_on_status(msg: dict) -> None:
+    """Every status frame the server sends is also the gate's cue: awake
+    while Auvren thinks or speaks, then a follow-up window once he is done,
+    so an answer to his question needs no second wake word.
+
+    It is the on-device ears' cue too: they stop listening while he speaks
+    (a raw microphone has no echo cancellation; see stt.py)."""
+    global _auvren_speaking, _last_status_state
+    if msg.get("type") != "status":
+        return
+    state = msg.get("state")
+    if state in ("speaking", "idle", "thinking"):
+        _auvren_speaking = state == "speaking"
+        _apply_ears_pause()
+    if isinstance(state, str):
+        _last_status_state = state
+    if wake_gate.enabled:
+        if state in _WAKE_HOLDING_STATES:
+            wake_gate.hold()
+        elif state == "idle":
+            wake_gate.release()
+            _schedule_wake_sleep()
+    _tray_refresh()
+
+
+def _schedule_wake_sleep() -> None:
+    """Tell the browser when the window closes, so the orb goes to sleep."""
+    global _wake_sleep_timer
+    if _wake_sleep_timer is not None:
+        _wake_sleep_timer.cancel()
+        _wake_sleep_timer = None
+    left = wake_gate.seconds_left
+    if not wake_gate.enabled or left == float("inf"):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _wake_sleep_timer = loop.call_later(left + 0.05, lambda: _spawn(_wake_sleep_check()))
+
+
+async def _wake_sleep_check() -> None:
+    if wake_gate.awake:
+        _schedule_wake_sleep()        # extended meanwhile; look again later
+        return
+    log.info("wake: asleep")
+    await _voice_emit(_wake_frame())
+    _tray_refresh()
+
+
+async def _wake_up(source: str, score: Optional[float] = None,
+                   was_awake: Optional[bool] = None, summon: bool = True) -> None:
+    """The wake word was heard — by the engine ("audio") or in a transcript.
+
+    `was_awake` is passed by callers whose gate call has ALREADY opened the
+    window, so the browser still hears that Auvren just woke.
+
+    Heard by the engine WHILE he is talking, it is the way to cut him off:
+    the on-device ears are paused while he speaks, the engine is not."""
+    if not wake_gate.enabled or (source == "audio" and _mic_muted):
+        return
+    if source == "audio" and time.monotonic() < _name_spoken_until:
+        log.info("wake: ignored (%.2f), he has just said his own name", score or 0.0)
+        return
+    if source == "audio" and speech is not None and speech.is_speaking:
+        await speech.barge_in(keep_unread=False, reason="wake word")
+    if was_awake is None:
+        was_awake = wake_gate.awake
+    wake_gate.open()
+    log.info("wake: %s%s", source, f" ({score:.2f})" if score is not None else "")
+    if not was_awake or source == "audio":
+        await _voice_emit({**_wake_frame(), "cue": True})
+    _schedule_wake_sleep()
+    _tray_refresh()
+    if summon and not voice_clients and _summon_enabled():
+        await _summon_app()
+
+
+def _start_wake_listener(stream_factory=None) -> None:
+    """Start the wake-word engine if it is installed. Never raises: without
+    it, a transcript that opens with the wake word still wakes Auvren."""
+    global wake_listener
+    if not wake_gate.enabled or wake_listener is not None:
+        return
+    problem = wakeword.engine_problem()
+    if problem:
+        log.warning("wake word: engine off (%s); the transcript wake still works", problem)
+        return
+    loop = asyncio.get_running_loop()
+
+    def heard(score: float) -> None:          # called on the listener's thread
+        loop.call_soon_threadsafe(lambda: _spawn(_wake_up("audio", score)))
+
+    kwargs = {"stream_factory": stream_factory} if stream_factory is not None else {}
+    listener = wakeword.WakeListener(heard, threshold=_float_env("WAKE_THRESHOLD", 0.5),
+                                     **kwargs)
+    problem = listener.start()
+    if problem:
+        log.warning("wake word: engine off (%s)", problem)
+        return
+    wake_listener = listener
+
+
+def _stop_wake_listener() -> None:
+    global wake_listener
+    listener, wake_listener = wake_listener, None
+    if listener is not None:
+        listener.stop()
+
+
+# --- being summoned: the wake word with no window open ---------------------
+#
+# The server can listen with no page open (on-device recognition, or the wake
+# engine). When the wake word arrives and nobody is connected, it opens
+# Auvren's own window (actions.open_app_window), holds the listening window
+# open while that loads, and once the page has played its intro and says
+# `hello`, asks "Yes, sir?" — or, if the request came in the same breath as
+# the wake word ("Hey Auvren, what time is it?"), answers it.
+
+SUMMON_HOLD_SEC = 45.0          # how long a summon waits for its window
+SUMMON_DEBOUNCE_SEC = 20.0      # one window per wake, however often it is said
+SUMMON_HELLO_GRACE_SEC = 8.0    # a page that never says hello is asked anyway
+_summon: dict = {"pending_until": 0.0, "last": -float("inf"), "request": None}
+
+
+def _summon_enabled() -> bool:
+    return (os.getenv("AUVREN_SUMMON") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _app_base() -> str:
+    """Where Auvren's window loads: AUVREN_APP_URL, else this server when it
+    serves the built page, else the Vite dev server."""
+    base = (os.getenv("AUVREN_APP_URL") or "").strip()
+    if base:
+        return base
+    if FRONTEND_DIST.exists():
+        scheme = os.getenv("JARVIS_SCHEME") or "https"
+        port = os.getenv("JARVIS_PORT") or "8340"
+        return f"{scheme}://127.0.0.1:{port}/"
+    return "http://localhost:5173/"
+
+
+def _app_url() -> str:
+    """The page, opened BY the wake word: it plays the long intro and asks."""
+    base = _app_base()
+    return base + ("&" if "?" in base else "?") + "summoned=1"
+
+
+def _dashboard_url() -> str:
+    base = _app_base()
+    # This server serves the dashboard at /dashboard; Vite at /dashboard.html.
+    page = "dashboard.html" if base.rstrip("/").endswith(":5173") else "dashboard"
+    return base.split("?", 1)[0].rstrip("/") + "/" + page
+
+
+def _summon_pending() -> bool:
+    return time.monotonic() < _summon["pending_until"]
+
+
+async def _summon_app(request: Optional[str] = None) -> bool:
+    """Open Auvren's window (once per SUMMON_DEBOUNCE_SEC), and keep the
+    request — if there was one — for when it is up."""
+    now = time.monotonic()
+    if request:
+        _summon["request"] = request
+    _summon["pending_until"] = now + SUMMON_HOLD_SEC
+    wake_gate.open(SUMMON_HOLD_SEC)
+    _schedule_wake_sleep()
+    if now - _summon["last"] < SUMMON_DEBOUNCE_SEC:
+        return True                     # already on its way
+    _summon["last"] = now
+    url = _app_url()
+    result = await actions.open_app_window(url, str(data_paths.data_dir() / "app-window"))
+    if result.get("success"):
+        log.info("summoned: opened %s", url)
+        return True
+    log.warning("summoned, but the window would not open: %s", result.get("confirmation"))
+    _summon["pending_until"] = 0.0
+    _summon["request"] = None
+    _summon["last"] = -float("inf")       # the next wake word tries again
+    try:
+        if notifier.available():
+            await notifier.notify("Auvren", "I heard you, but my window wouldn't open.")
+    except Exception as e:
+        log.warning(f"summon notice failed: {e}")
+    return False
+
+
+async def _answer_summon() -> None:
+    """The summoned window is up: ask, or answer what was already asked."""
+    if not _summon_pending() or speech is None:
+        return
+    request = _summon["request"]
+    _summon["pending_until"] = 0.0
+    _summon["request"] = None
+    if request:
+        log.info(f"User (summoned): {request}")
+        _spawn(_handle_utterance(request))
+    else:
+        honorific = (os.getenv("HONORIFIC") or "sir").strip() or "sir"
+        await speech.say(f"Yes, {honorific}?", Priority.NORMAL)
+
+
+async def _answer_summon_later(delay: float) -> None:
+    """For a page that never says hello (an old build): ask anyway."""
+    await asyncio.sleep(delay)
+    await _answer_summon()
+
+
+# --- the tray icon (tray.py) ------------------------------------------------
+
+def _tray_state() -> tuple[str, str]:
+    if _brain_down:
+        return "down", _brain_down
+    if _mic_muted:
+        return "muted", ""
+    if _last_status_state in ("thinking", "compacting"):
+        return "thinking", ""
+    if _last_status_state == "speaking":
+        return "speaking", ""
+    if not wake_gate.enabled or wake_gate.awake:
+        return "awake", ""
+    return "asleep", ""
+
+
+def _tray_refresh() -> None:
+    if tray_icon is not None:
+        tray_icon.set_state(*_tray_state())
+
+
+def _app_profile() -> str:
+    return str(data_paths.data_dir() / "app-window")
+
+
+async def _tray_open() -> None:
+    result = await actions.open_app_window(_app_base(), _app_profile())
+    if not result.get("success") and tray_icon is not None:
+        tray_icon.notify(result.get("confirmation") or "My window wouldn't open.")
+
+
+async def _tray_dashboard() -> None:
+    result = await actions.open_app_window(_dashboard_url(), _app_profile())
+    if not result.get("success") and tray_icon is not None:
+        tray_icon.notify(result.get("confirmation") or "The dashboard wouldn't open.")
+
+
+async def _tray_listen() -> None:
+    """"Listen now": the wake word, from the menu."""
+    if not voice_clients:
+        await _summon_app()
+    elif wake_gate.enabled:
+        await _wake_up("tray", was_awake=False, summon=False)
+
+
+async def _tray_toggle_mute() -> None:
+    _set_mic_muted(not _mic_muted)
+    await _voice_emit({"type": "mute", "muted": _mic_muted})
+
+
+def _tray_toggle_autostart() -> None:
+    """On the tray's own thread: making a shortcut takes a moment, and
+    blocks nothing but the menu."""
+    ok, sentence = tray.set_autostart(not tray.autostart_enabled(), Path(__file__).parent)
+    if tray_icon is not None:
+        tray_icon.refresh_menu()
+        tray_icon.notify(sentence)
+
+
+async def _tray_show_log() -> None:
+    path = data_paths.data_dir() / "logs" / "auvren.log"
+    if not path.is_file():
+        if tray_icon is not None:
+            tray_icon.notify("No log yet: it is written while Auvren runs in the background.")
+        return
+    await actions.open_text_file(str(path))
+
+
+async def _tray_quit() -> None:
+    """Quit the way Ctrl+C does: uvicorn's own handler shuts the server down
+    cleanly — brain handover, speech, microphone and this icon included."""
+    log.info("quit from the tray")
+    signal.raise_signal(signal.SIGINT)
+
+
+def _start_tray() -> None:
+    """Show the tray icon, if wanted and installed. Never raises."""
+    global tray_icon
+    if tray_icon is not None or not tray.setting_enabled():
+        return
+    problem = tray.tray_problem()
+    if problem:
+        log.info("tray: off (%s)", problem)
+        return
+    loop = asyncio.get_running_loop()
+
+    def on_loop(fn):
+        return lambda: loop.call_soon_threadsafe(fn)
+
+    def spawn(coro_fn):
+        return lambda: loop.call_soon_threadsafe(lambda: _spawn(coro_fn()))
+
+    icon = tray.Tray(tray.TrayActions(
+        open=spawn(_tray_open), dashboard=spawn(_tray_dashboard), listen=spawn(_tray_listen),
+        toggle_mute=spawn(_tray_toggle_mute), toggle_autostart=_tray_toggle_autostart,
+        show_log=spawn(_tray_show_log), quit=spawn(_tray_quit),
+        is_muted=lambda: _mic_muted, is_autostart=tray.autostart_enabled),
+        phrase=wakeword.spoken_phrase())
+    icon.set_state(*_tray_state())
+    problem = icon.start()
+    if problem:
+        log.warning("tray: %s", problem)
+        return
+    tray_icon = icon
+    if os.getenv("AUVREN_BACKGROUND") == "1":
+        icon.notify(f"Running in the background. Say \u201c{wakeword.spoken_phrase()}\u201d.")
+
+
+def _stop_tray() -> None:
+    global tray_icon
+    icon, tray_icon = tray_icon, None
+    if icon is not None:
+        icon.stop()
+
+
+# --- on-device speech recognition (stt.py) --------------------------------
+
+def _apply_ears_pause() -> None:
+    """Deaf while muted, and while he speaks unless told otherwise."""
+    if local_ears is not None:
+        local_ears.set_paused(_mic_muted or (_auvren_speaking and not stt.listen_while_speaking()))
+
+
+def _set_mic_muted(muted: bool) -> None:
+    global _mic_muted
+    if muted != _mic_muted:
+        log.info("microphone %s by the user", "muted" if muted else "unmuted")
+    _mic_muted = muted
+    _apply_ears_pause()
+    _tray_refresh()
+    if tray_icon is not None:
+        tray_icon.refresh_menu()
+
+
+def _ears_should_transcribe() -> bool:
+    """Called on the ears' thread when an utterance ends. With a TRUSTED
+    wake engine running, nothing is transcribed while Auvren is asleep — the
+    engine decides. Otherwise the words ARE the wake word (or back up an
+    engine trained only on synthetic voices), so everything is: on this
+    machine, and kept nowhere."""
+    if not wake_gate.enabled or wake_listener is None or not wakeword.engine_trusted():
+        return True
+    return wake_gate.awake
+
+
+def _on_local_speech() -> None:
+    """The on-device ears hear someone talking: keep an open window open
+    until he finishes the sentence (the browser's interims did this)."""
+    if wake_gate.enabled and wake_gate.awake:
+        wake_gate.open(wake_gate.interim_grace)
+
+
+def _stt_vocabulary() -> list[str]:
+    """Words to prime the recogniser with: the wake word and project names,
+    which Whisper otherwise mishears ("sitearc" -> "sitock")."""
+    words = ["Auvren", *wakeword.vocabulary(), "Claude Code"]
+    for p in list(cached_projects)[:40]:
+        name = p.get("name") if isinstance(p, dict) else None
+        if name:
+            words.append(str(name))
+    return words
+
+
+async def _start_local_audio() -> None:
+    """Open the microphone once, for the wake engine and the on-device ears.
+    Never raises: anything missing leaves Auvren listening as before."""
+    global mic_hub, local_ears, STT_MODE
+    want_ears = STT_MODE == "local"
+    want_wake = wake_gate.enabled and wakeword.engine_problem() is None
+    if not (want_ears or want_wake):
+        return
+    mic_hub = mic.MicHub()
+    if want_wake:
+        _start_wake_listener(stream_factory=mic_hub.subscribe)
+    if not want_ears:
+        return
+    loop = asyncio.get_running_loop()
+    problem = stt.engine_problem()
+    ears = None
+    if problem is None:
+        ears = stt.LocalEars(
+            lambda text: loop.call_soon_threadsafe(
+                lambda: _spawn(_on_final_transcript(text, source="local"))),
+            subscribe=mic_hub.subscribe,
+            should_transcribe=_ears_should_transcribe,
+            on_speech=lambda: loop.call_soon_threadsafe(_on_local_speech),
+            vocabulary=_stt_vocabulary)
+        try:
+            # Loading the model takes a second or two; never on the loop.
+            problem = await asyncio.wait_for(asyncio.to_thread(ears.start), timeout=120)
+        except asyncio.TimeoutError:
+            problem = "the speech model took too long to load"
+    if problem:
+        log.warning("on-device speech recognition off (%s); the browser will listen", problem)
+        if ears is not None:
+            ears.stop()
+        STT_MODE = "browser"
+        await _voice_emit({"type": "stt", "mode": STT_MODE})
+        return
+    local_ears = ears
+    _apply_ears_pause()
+
+
+def _stop_local_audio() -> None:
+    global local_ears, mic_hub
+    ears, local_ears = local_ears, None
+    if ears is not None:
+        ears.stop()
+    _stop_wake_listener()
+    hub, mic_hub = mic_hub, None
+    if hub is not None:
+        hub.close()
+
+
 async def _voice_emit(msg: dict) -> None:
     """Hand one protocol message to every connected voice client.
 
@@ -598,6 +1051,7 @@ async def _voice_emit(msg: dict) -> None:
     for an ack that can never come. Status frames with nobody listening are
     simply lost.
     """
+    _wake_on_status(msg)
     delivered = 0
     for ws in list(voice_clients):
         queue = _voice_queues.get(ws)
@@ -610,8 +1064,25 @@ async def _voice_emit(msg: dict) -> None:
         raise NoVoiceClient("no voice client connected")
 
 
+# The wake engine hears the speakers too, and "Auvren" is in his own lines
+# ("Auvren at your service"); said as "Ovren" — exactly what the trained model
+# listens for. Synthesis runs a chunk or two ahead of playback, so the guard
+# is generous: a wake heard from the engine within it is his own voice.
+_NAME_SPOKEN = re.compile(r"\bauvren\b", re.IGNORECASE)
+_name_spoken_until = 0.0
+
+
+def _note_own_name(text: str) -> None:
+    global _name_spoken_until
+    if _NAME_SPOKEN.search(text or ""):
+        _name_spoken_until = max(_name_spoken_until,
+                                 time.monotonic() + 20.0 + len(text) / 10.0)
+
+
 async def _synth_for_speech(text: str) -> Optional[bytes]:
-    r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
+    _note_own_name(text)
+    r = await tts.synthesize(text, fish_api_key=FISH_API_KEY, fish_voice_id=FISH_VOICE_ID,
+                             client=_tts_client)
     if r is None:
         return None
     _session_tokens["tts_calls"] += 1
@@ -631,7 +1102,9 @@ def _fmt_reset(ts) -> str:
         when = datetime.fromtimestamp(float(ts))
     except (TypeError, ValueError, OSError, OverflowError):
         return "later"
-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+    # No "%-I" / "%-d": the Windows C runtime rejects the "-" flag outright.
+    clock = f"{when.hour % 12 or 12}:{when.minute:02d} {when.strftime('%p')}"
+    clock = clock.replace(":00 ", " ")                       # "10:00 AM" -> "10 AM"
     days = (when.date() - datetime.now().date()).days
     if days <= 0:
         return clock
@@ -639,7 +1112,7 @@ def _fmt_reset(ts) -> str:
         return f"tomorrow at {clock}"
     if days < 7:
         return f"{when.strftime('%A')} at {clock}"
-    return f"{when.strftime('%A %-d %B')} at {clock}"
+    return f"{when.strftime('%A')} {when.day} {when.strftime('%B')} at {clock}"
 
 
 # True but useless: "down" names neither cause nor remedy. When the brain's
@@ -651,7 +1124,7 @@ def _fmt_reset(ts) -> str:
 _AUTH_BRAIN_DOWN_LINE = ("Claude Code's login has expired, sir — run `claude` in a "
                         "terminal and log in, then restart me.")
 _AUTH_REMEDY_LOG_LINE = ("brain: giving up — Claude Code's OAuth login has expired. "
-                         "Remedy: run `claude` in a terminal and log in, then restart JARVIS.")
+                         "Remedy: run `claude` in a terminal and log in, then restart Auvren.")
 
 # "Say that again" before JARVIS has said anything this session (or after
 # whatever he last said has aged out of history): there is nothing held to
@@ -696,7 +1169,37 @@ def _action_words(text: str) -> list[str]:
     return _re.findall(r"[a-z]+", text.lower())
 
 
+def _brain_down_line(failure_reason, generic: str = "My language systems are down, sir. "
+                                                   "Check the server log.") -> str:
+    """What is said when the brain cannot answer, by why."""
+    if failure_reason == "auth":
+        return _AUTH_BRAIN_DOWN_LINE
+    if failure_reason == "ollama_down":
+        return "I can't reach Ollama, sir. Start it and I'll be with you shortly."
+    if failure_reason == "model_missing":
+        return "My local model isn't downloaded yet, sir. Pull it with Ollama and I'll be along."
+    return generic
+
+
+_BRAIN_DOWN_SHORT = {
+    "auth": "Claude Code is not logged in",
+    "ollama_down": "Ollama is not running",
+    "model_missing": "the local model is not downloaded",
+}
+
+
 async def _on_brain_state(state: str, info: dict) -> None:
+    global _brain_down
+    if state == "failed":
+        _brain_down = _BRAIN_DOWN_SHORT.get(info.get("failure_reason"), "the brain is down")
+        _tray_refresh()
+    elif state in ("ready", "rotated"):
+        _brain_down = None
+        _tray_refresh()
+    await _on_brain_state_spoken(state, info)
+
+
+async def _on_brain_state_spoken(state: str, info: dict) -> None:
     if state == "failed" and info.get("failure_reason") == "auth":
         # At ERROR level, visible in the terminal the user is already
         # looking at, regardless of whether speech itself is available.
@@ -709,9 +1212,11 @@ async def _on_brain_state(state: str, info: dict) -> None:
             _brain_notice_at["restarting"] = now
             await speech.say("Rebooting my language systems, one moment.", Priority.NORMAL)
     elif state == "failed":
-        line = (_AUTH_BRAIN_DOWN_LINE if info.get("failure_reason") == "auth"
-               else "My language systems are down, sir. Check the server log.")
-        await speech.say(line, Priority.URGENT, immediate=True)
+        await speech.say(_brain_down_line(info.get("failure_reason")),
+                         Priority.URGENT, immediate=True)
+    elif state == "ready" and info.get("recovered"):
+        # The local brain found Ollama (or its model) after starting without it.
+        await speech.say("My language systems are back, sir.", Priority.NORMAL)
     elif state == "rate_limited":
         await speech.say(f"I've hit the usage limit until {_fmt_reset(info.get('resets_at'))}, sir.",
                          Priority.NORMAL)
@@ -879,7 +1384,7 @@ def _write_mcp_config(home: Path) -> Path:
         },
     }
     config = {
-        "//": ("Generated by JARVIS on every start — your edits here are lost. "
+        "//": ("Generated by Auvren on every start — your edits here are lost. "
                f"Declare your own servers in {data_paths.connections_path()}."),
         "mcpServers": servers,
     }
@@ -950,12 +1455,19 @@ async def start_brain_and_speech() -> None:
     home = jarvis_memory.ensure_layout()
     data_paths.ensure_tool_token()
     mcp_path = _write_mcp_config(home)
-    config = BrainConfig.from_env(home)
-    config.mcp_config = mcp_path
-    # Exactly the servers `_write_mcp_config` accepted — so what is merged into
-    # the config and what the allowlist grants can never disagree.
-    config.connections = sorted(LAST_CONNECTIONS.servers)
-    brain_instance = Brain(config)
+    if local_brain.brain_engine() == local_brain.BRAIN_LOCAL:
+        # The offline brain (Ollama). Its tools run in-process through the
+        # same gate the Claude brain's MCP child reaches over HTTP.
+        brain_instance = LocalBrain(LocalBrainConfig.from_env(home), run_tool=run_tool_call)
+        log.info("brain: local (Ollama %s at %s)", brain_instance.config.model,
+                 brain_instance.config.url)
+    else:
+        config = BrainConfig.from_env(home)
+        config.mcp_config = mcp_path
+        # Exactly the servers `_write_mcp_config` accepted — so what is merged
+        # into the config and what the allowlist grants can never disagree.
+        config.connections = sorted(LAST_CONNECTIONS.servers)
+        brain_instance = Brain(config)
     brain_instance.on_state(_on_brain_state)
     # The other half of the handover: the brain reads the last real journal
     # entry itself, and asks us who is working right now. Called at spawn
@@ -1163,6 +1675,8 @@ async def stop_brain_and_speech() -> None:
         raise
     except Exception as e:
         log.warning(f"shutdown journal failed: {e}")
+    _stop_tray()
+    _stop_local_audio()
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
                         ("tts client", _tts_client.aclose() if _tts_client else None)):
@@ -1296,7 +1810,7 @@ async def _notify_needs_you(name: str, line: str) -> None:
     if voice_clients or not notifier.available():
         return
     try:
-        await notifier.notify("JARVIS", line, subtitle=name)
+        await notifier.notify("Auvren", line, subtitle=name)
     except Exception as e:
         log.warning(f"needs-you notification failed: {e}")
 
@@ -1630,9 +2144,8 @@ async def _handle_utterance(text: str) -> None:
     await _voice_emit({"type": "status", "state": "thinking"})
     if not brain_instance.ready:
         if brain_instance.failed:
-            line = (_AUTH_BRAIN_DOWN_LINE
-                    if getattr(brain_instance, "failure_reason", None) == "auth"
-                    else "My language systems are down, sir.")
+            line = _brain_down_line(getattr(brain_instance, "failure_reason", None),
+                                    generic="My language systems are down, sir.")
         else:
             line = "One moment, sir — my language systems are still starting."
         await speech.say(line, Priority.NORMAL)
@@ -1805,6 +2318,8 @@ async def lifespan(application: FastAPI):
     run_store.sweep_stale_runs()
 
     await start_brain_and_speech()
+    await _start_local_audio()
+    _start_tray()
     await start_session_watcher()
     # Deliberately not awaited: every check is time-boxed to 5s, so running
     # them inline could hold the server closed for that long before the UI can
@@ -1825,7 +2340,7 @@ async def lifespan(application: FastAPI):
 # tool, so it lives behind a debugging flag.
 _DEBUG_DOCS = os.getenv("JARVIS_DEBUG_DOCS", "").lower() in ("1", "true", "yes")
 
-app = FastAPI(title="JARVIS Server", version="0.1.0", lifespan=lifespan,
+app = FastAPI(title="Auvren Server", version="0.1.0", lifespan=lifespan,
               docs_url="/docs" if _DEBUG_DOCS else None,
               redoc_url="/redoc" if _DEBUG_DOCS else None,
               openapi_url="/openapi.json" if _DEBUG_DOCS else None)
@@ -1849,7 +2364,7 @@ app.add_middleware(web_auth.OriginGuard)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
+    return {"status": "online", "name": "Auvren", "version": "0.1.0"}
 
 
 @app.post("/api/tts-test")
@@ -2582,7 +3097,19 @@ async def internal_tool(request: Request):
     args = body.get("arguments") or {}
     if not isinstance(args, dict):
         return _tool_reply(False, "Arguments must be an object.")
+    return await run_tool_call(tool, args)
 
+
+async def run_tool_call(tool: str, args: dict) -> dict:
+    """Run one tool for whichever brain is running, behind every gate.
+
+    The Claude brain arrives here through `/internal/tool` (its MCP child,
+    over loopback, bearing the token); the local brain calls this directly,
+    in-process. Either way the gates below read the running brain's own
+    `current_origin` and taint, so there is one rule set, not two.
+    """
+    if not isinstance(args, dict):
+        return _tool_reply(False, "Arguments must be an object.")
     handler = TOOL_HANDLERS.get(tool)
     if handler is None:
         return _tool_reply(False, f"Unknown tool: {tool}")
@@ -3532,8 +4059,7 @@ async def _perform_command(item: _StagedCommand) -> None:
         # wrong directory, and the path is quoted while the command itself has
         # already been through `builds.command_problem`, which permits no
         # shell metacharacter at all.
-        result = await actions.open_terminal(
-            f"cd {shlex.quote(item.path)} && {item.command}")
+        result = await actions.open_terminal(item.path, item.command)
         if result.get("success"):
             record("ran")
             await speech.say(
@@ -4854,14 +5380,14 @@ async def tool_open_in_browser(args: dict) -> str:
 
 
 async def tool_open_in_terminal(args: dict) -> str:
-    """Open Terminal.app in a project directory."""
+    """Open Windows Terminal in a project directory."""
     reference = str(args.get("project") or "").strip()
     if not reference:
         return "Which project, sir?"
     name, path, problem = _resolve_project_or_explain(reference)
     if problem:
         return problem
-    result = await actions.open_terminal(f"cd {shlex.quote(path)}")
+    result = await actions.open_terminal(path)
     if not result.get("success"):
         return result.get("confirmation") or "Terminal wouldn't open, sir."
     return f"Terminal's open in {name}, sir."
@@ -5349,12 +5875,13 @@ REPO_SENSITIVE_REFUSAL = ("That's a private file, sir — credentials and keys "
 # JARVIS's own `.env` is refused exactly as any other project's is. That is
 # not incidental: his .env holds the Fish API key.
 
-JARVIS_SELF_NAME = "JARVIS"
+JARVIS_SELF_NAME = "Auvren"
 
 # What the user actually says. Matched exactly, after lowercasing and
 # stripping punctuation — never as a substring, or a real project called
 # "jarvis-dashboard" would resolve to the wrong thing.
 _SELF_ALIASES = frozenset({
+    "auvren", "auvren itself", "yourself, auvren",
     "jarvis", "you", "yourself", "your source", "your code", "your own code",
     "your source code", "your own source", "your repo", "your repository",
     "your own repo", "jarvis itself", "yourself, jarvis", "this project",
@@ -6542,7 +7069,7 @@ async def api_project_open(body: ProjectOpenRequest):
     if body.target == "editor":
         result = await actions.open_in_editor(body.path)
     elif body.target == "terminal":
-        result = await actions.open_terminal(f"cd {shlex.quote(body.path)}")
+        result = await actions.open_terminal(body.path)
     elif body.target == "browser":
         result = await actions.open_browser(Path(body.path).as_uri())
     else:
@@ -6567,6 +7094,73 @@ def _scan_projects_sync() -> list[dict]:
 
 # -- WebSocket Voice Handler -----------------------------------------------
 
+async def _on_interim_transcript(text: str) -> None:
+    """Part of a sentence, still being spoken (browser recogniser only)."""
+    if speech is None:
+        return
+    was_awake = wake_gate.awake
+    gate = wake_gate.on_interim(text)
+    if gate == "wake":
+        await _wake_up("transcript", was_awake=was_awake)
+    if gate != "ignore":
+        # Asleep, somebody else's voice must not cut Auvren off.
+        await speech.user_interim(text)
+
+
+async def _on_final_transcript(text: str, source: str = "browser") -> None:
+    """One finished utterance, from Chrome's recogniser or the on-device one
+    (stt.py) — the same gate, echo filter and brain either way."""
+    if speech is None:
+        return
+    text = apply_speech_corrections(str(text or "").strip())
+    if not text:
+        return
+    was_awake = wake_gate.awake
+    gate, request = wake_gate.on_final(text)
+    if gate == "ignore":
+        log.info(f"User (asleep, ignored): {text}")
+        return
+    if gate == "wake":
+        log.info(f"User (wake word only): {text}")
+        await _wake_up("transcript", was_awake=was_awake)
+        return
+    if request != text:
+        log.info(f"User (wake word): {text}")
+        # Not summoned from here: if a window is needed, it is opened once,
+        # below, carrying the request.
+        await _wake_up("transcript", was_awake=was_awake, summon=False)
+    text = request
+    verdict = await speech.user_final(text)
+    if verdict == "replay":
+        # "Say that again": resend what was already synthesized — no brain
+        # turn, so no cost and no risk of coming back with different words.
+        # Never routed to _handle_utterance.
+        log.info(f"User (replay): {text}")
+        if not await speech.replay_last():
+            await speech.say(NOTHING_TO_REPLAY_LINE, Priority.NORMAL)
+        return
+    if verdict != "speech":
+        # Say WHY, so a dropped sentence can be diagnosed from the log alone.
+        # Live, "User (echo, ignored): now" was the first word of the user's
+        # reply being eaten, and it took a transcript read-through to see
+        # that -- the age of the last played chunk is the fact that decides it.
+        since = speech.seconds_since_last_played()
+        ago = f"{since:.1f}s after his last audio" if since != float("inf") \
+            else "with nothing of his played yet"
+        log.info(f"User ({verdict}, ignored, {ago}): {text}")
+        return
+    log.info(f"User{' (on-device)' if source == 'local' else ''}: {text}")
+    if not voice_clients and _summon_enabled():
+        # Heard on the laptop with no window open: open one, and answer
+        # this once it is up rather than into an empty room.
+        await _summon_app(request=text)
+        return
+    if _is_fresh_start(text):
+        _spawn(_start_fresh())
+        return
+    _spawn(_handle_utterance(text))
+
+
 @app.websocket("/ws/voice")
 async def voice_handler(ws: WebSocket):
     """
@@ -6576,6 +7170,10 @@ async def voice_handler(ws: WebSocket):
         {"type": "transcript", "text": "...", "isFinal": true}
         {"type": "interim", "text": "..."}          partial recognition, throttled
         {"type": "played", "utt": 3, "idx": 1}      one audio chunk finished playing
+        {"type": "mute", "muted": true}              the mute button (also stops the
+                                                     on-device ears and wake engine)
+        {"type": "hello", "summoned": true}          a window the wake word opened has
+                                                     played its intro: ask, or answer
 
     Server -> Client:
         {"type": "config", "muteMicDuringSpeech": false}
@@ -6584,6 +7182,14 @@ async def voice_handler(ws: WebSocket):
         {"type": "drop_queued"}                      keep the playing chunk, drop the rest
         {"type": "status", "state": "thinking"|"speaking"|"idle"}
         {"type": "text", "text": "..."}              a chunk TTS could not voice
+        {"type": "wake", "enabled": true, "awake": false, "phrase": "Hey Jarvis",
+         "cue": true}                                the wake word opened (cue) or
+                                                     the listening window closed
+        {"type": "mute", "muted": true}              muted from the tray or another tab
+        {"type": "stt", "mode": "browser"}           who listens: "local" (stt.py, on
+                                                     this machine) or "browser" (also
+                                                     in `config`); the page runs Chrome's
+                                                     recogniser only for "browser"
 
     Run lifecycle events are published on /ws/runs, not here.
     """
@@ -6594,11 +7200,16 @@ async def voice_handler(ws: WebSocket):
         # Through this client's own queue, not straight down the socket, so
         # the opening frames cannot be overtaken by a broadcast that lands
         # while they are in flight.
-        _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH})
+        _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH,
+                         "wake": _wake_frame(), "stt": STT_MODE})
         _enqueue(queue, {"type": "status", "state": "idle"})
 
         global _last_greeting_time
-        if speech is not None and time.time() - _last_greeting_time > 60:
+        if _summon_pending():
+            # The wake word opened this window: it asks once its intro has
+            # played (`hello`), not with a greeting now.
+            _spawn(_answer_summon_later(SUMMON_HELLO_GRACE_SEC))
+        elif speech is not None and time.time() - _last_greeting_time > 60:
             _last_greeting_time = time.time()
             await speech.say(_greeting(), Priority.NORMAL)
 
@@ -6633,6 +7244,14 @@ async def voice_handler(ws: WebSocket):
                 log.info("hush: stopped by the user")
                 await speech.barge_in(keep_unread=False, reason="hush (key)")
                 continue
+            if kind == "mute":
+                _set_mic_muted(bool(msg.get("muted")))
+                # Every other open page, and the tray, show the same.
+                await _voice_emit({"type": "mute", "muted": _mic_muted})
+                continue
+            if kind == "hello":
+                await _answer_summon()
+                continue
             if kind == "interim":
                 # Logged because its ABSENCE is the diagnosis. A session that
                 # is capturing but returning nothing looks identical, from
@@ -6642,7 +7261,8 @@ async def voice_handler(ws: WebSocket):
                 # wrong happened after this point.
                 text = str(msg.get("text", ""))
                 log.info("mic-hears: %s", text[-70:])
-                await speech.user_interim(text)
+                if local_ears is None:
+                    await _on_interim_transcript(text)
             elif kind == "played":
                 try:
                     # OverflowError is in there because `int(float('inf'))`
@@ -6652,34 +7272,13 @@ async def voice_handler(ws: WebSocket):
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
             elif kind == "transcript" and msg.get("isFinal"):
-                text = apply_speech_corrections(str(msg.get("text", "")).strip())
-                if not text:
+                if local_ears is not None:
+                    # Listening on this machine already: a tab still running
+                    # Chrome's recogniser would double every request.
+                    log.info("browser transcript ignored (listening on-device): %s",
+                             str(msg.get("text", ""))[:70])
                     continue
-                verdict = await speech.user_final(text)
-                if verdict == "replay":
-                    # "Say that again": resend what was already synthesized —
-                    # no brain turn, so no cost and no risk of coming back
-                    # with different words. Never routed to _handle_utterance.
-                    log.info(f"User (replay): {text}")
-                    if not await speech.replay_last():
-                        await speech.say(NOTHING_TO_REPLAY_LINE, Priority.NORMAL)
-                    continue
-                if verdict != "speech":
-                    # Say WHY, so a dropped sentence can be diagnosed from the
-                    # log alone. Live, "User (echo, ignored): now" was the first
-                    # word of the user's reply being eaten, and it took a
-                    # transcript read-through to see that -- the age of the
-                    # last played chunk is the fact that decides it.
-                    since = speech.seconds_since_last_played()
-                    ago = f"{since:.1f}s after his last audio" if since != float("inf") \
-                        else "with nothing of his played yet"
-                    log.info(f"User ({verdict}, ignored, {ago}): {text}")
-                    continue
-                log.info(f"User: {text}")
-                if _is_fresh_start(text):
-                    _spawn(_start_fresh())
-                    continue
-                _spawn(_handle_utterance(text))
+                await _on_final_transcript(str(msg.get("text", "")))
     except WebSocketDisconnect:
         log.info("Voice WebSocket disconnected")
     except Exception as e:
@@ -6808,7 +7407,7 @@ def _write_env_key(key: str, value: str) -> None:
     separate setting.
     """
     if key not in SETTABLE_ENV_KEYS:
-        raise ValueError(f"{key} is not a setting JARVIS will write")
+        raise ValueError(f"{key} is not a setting Auvren will write")
     problem = _env_value_problem(key, value)
     if problem:
         raise ValueError(problem)
@@ -6878,6 +7477,11 @@ async def api_settings_status():
         "claude_code_installed": claude_installed,
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
+        # Whether the selected voice can speak — what first-run setup keys on,
+        # so a Piper install is not sent to a Fish key form it does not need.
+        "tts_engine": tts.engine(),
+        "voice_ready": tts.voice_problem() is None,
+        "voice_problem": tts.voice_problem(),
         "env_keys_set": {
             "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
@@ -6955,6 +7559,25 @@ if FRONTEND_DIST.exists():
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _start_background_logging() -> None:
+    """pythonw has no console: sys.stdout and sys.stderr are None. Send
+    everything — our log, uvicorn's, stray prints — to a rotating file."""
+    from logging.handlers import RotatingFileHandler
+    log_dir = data_paths.data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_dir / "auvren.log", maxBytes=2_000_000,
+                                  backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    stream = open(log_dir / "auvren.out", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 # Loopback, not `0.0.0.0`.
 #
 # Everything on this surface acts with the user's full authority: /api/runs
@@ -6972,24 +7595,36 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="JARVIS Server")
+    parser = argparse.ArgumentParser(description="Auvren Server")
     parser.add_argument("--host", default=DEFAULT_BIND_HOST,
                         help="Bind host (default: loopback only)")
     parser.add_argument("--port", type=int, default=8340, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on changes")
     parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem")
+    parser.add_argument("--background", action="store_true",
+                        help="Run with no console (pythonw): serve the built page over "
+                             "plain HTTP on loopback, log to <data>/logs/auvren.log")
     args = parser.parse_args()
 
-    # Auto-detect SSL certs
+    if args.background:
+        _start_background_logging()
+        os.environ["AUVREN_BACKGROUND"] = "1"
+
+    # Auto-detect SSL certs. Not in the background: the page is served by
+    # this server itself there, over loopback HTTP — a secure context already
+    # — so the window it opens on the wake word shows no certificate warning.
     cert_file = Path(__file__).parent / "cert.pem"
     key_file = Path(__file__).parent / "key.pem"
-    use_ssl = args.ssl or (cert_file.exists() and key_file.exists())
+    use_ssl = not args.background and (args.ssl or (cert_file.exists() and key_file.exists()))
+    if args.background and not FRONTEND_DIST.exists():
+        log.warning("--background with no frontend/dist: run `npm run build` in frontend, "
+                    "or the summoned window has nothing to show")
 
     proto = "https" if use_ssl else "http"
     ws_proto = "wss" if use_ssl else "ws"
 
     print()
-    print("  J.A.R.V.I.S. Server v0.1.0")
+    print("  Auvren Server v0.1.0")
     print(f"  WebSocket: {ws_proto}://{args.host}:{args.port}/ws/voice")
     print(f"  REST API:  {proto}://{args.host}:{args.port}/api/")
     print(f"  Dashboard: {proto}://{args.host}:{args.port}/dashboard")
@@ -7011,11 +7646,22 @@ if __name__ == "__main__":
     os.environ["JARVIS_SCHEME"] = proto
     os.environ["JARVIS_BIND_HOST"] = args.host
 
+    reload = args.reload
+    if reload and sys.platform == "win32":
+        # uvicorn's reloader installs the Selector event loop on Windows, and
+        # asyncio cannot spawn subprocesses on that loop: the brain and every
+        # run would fail to start. Refuse it rather than come up mute.
+        print("  --reload is not supported on Windows (it breaks subprocesses); ignoring it.")
+        reload = False
+
     uvicorn.run(
         "server:app",
         host=args.host,
         port=args.port,
-        reload=args.reload,
+        reload=reload,
         log_level="info",
+        # In the background there is no console: uvicorn's own handlers
+        # would write to a stream that does not exist.
+        **({"log_config": None} if args.background else {}),
         **ssl_kwargs,
     )

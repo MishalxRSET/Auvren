@@ -1,5 +1,5 @@
 /**
- * The Memory view: what JARVIS carries into every conversation, and a way
+ * The Memory view: what Auvren carries into every conversation, and a way
  * to read (and know you can edit) the plain-Markdown folder behind it.
  *
  * The backend endpoint this targets (`GET /api/memory`, `GET
@@ -8,7 +8,7 @@
  * shipped yet", not "empty", and must degrade calmly with no console noise.
  *
  * Every string here — titles, hooks, and especially journal/memory body
- * text — can contain content JARVIS copied out of someone else's Claude
+ * text — can contain content Auvren copied out of someone else's Claude
  * Code session. Attacker-influenced, same discipline as Sessions: always
  * textContent, never innerHTML.
  */
@@ -131,7 +131,7 @@ function paintPath(path: string): void {
   pathRow.append(code, copy);
 
   holder.append(
-    el("div", "memory-hint", "Plain Markdown on disk. Edit it directly — JARVIS reads it fresh every conversation."),
+    el("div", "memory-hint", "Plain Markdown on disk. Edit it directly — Auvren reads it fresh every conversation."),
     pathRow,
   );
 }
@@ -246,7 +246,7 @@ async function reconcile(): Promise<void> {
       return;
     }
     console.error("[memory] reconcile failed", e);
-    showBanner("Cannot reach the JARVIS server.");
+    showBanner("Cannot reach the Auvren server.");
     return;
   }
 

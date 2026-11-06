@@ -1,18 +1,18 @@
 # Run the suite on every push and pull request.
 #
-# macOS, not Ubuntu, on purpose: JARVIS is a macOS-only project, and while
-# every macOS-specific subprocess (osascript, screencapture, sips, claude) is
-# faked at the seam in tests, the environment the suite was written against
-# is a Mac. A green run here means what a green run on the author's machine
-# means. Ubuntu would be cheaper and would also be a second environment
-# nobody develops on.
+# Auvren targets Windows, so the suite runs on Windows as well as on Ubuntu.
+# Every Win32 call is faked at a seam (winplat.py) and every subprocess
+# (piper, powershell, taskkill, wt, claude) is faked in tests, so both are
+# meaningful. The Windows job is `continue-on-error` for now: the suite was
+# written on macOS and some tests still assume POSIX (file modes, symlinks,
+# `/` paths). Its failures are the Windows port's to-do list, not noise —
+# once it is green, drop `continue-on-error` and make it the required job.
 #
-# The suite needs: Python 3.11+ (the code uses `X | None` at runtime; 3.9,
-# which macOS ships as `python3`, dies at import), Node for the frontend
-# build that tests/test_dashboard_page.py drives, and Playwright's Chromium
-# for the same test plus read_page / look_at_page. It does NOT need a Fish
-# Audio key, a Claude login, or the network: `pytest.ini` deselects the nine
-# browser-integration tests, and everything else runs offline.
+# The suite needs: Python 3.11+, Node for the frontend build that
+# tests/test_dashboard_page.py drives, and Playwright's Chromium for the same
+# test plus read_page / look_at_page. It does NOT need a voice, a Claude
+# login, or the network: `pytest.ini` deselects the browser-integration
+# tests, and everything else runs offline.
 
 name: tests
 
@@ -22,7 +22,12 @@ on:
 
 jobs:
   pytest:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 25
 
     steps:

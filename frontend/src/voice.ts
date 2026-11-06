@@ -1,7 +1,7 @@
 /**
- * Voice input (Web Speech API) and audio output (AudioContext) for JARVIS.
+ * Voice input (Web Speech API) and audio output (AudioContext) for Auvren.
  *
- * The microphone keeps listening while JARVIS speaks — the server decides what
+ * The microphone keeps listening while Auvren speaks — the server decides what
  * is echo and what is a barge-in. Playback is a strictly ordered queue of
  * chunks; each one is acknowledged to the server when it finishes.
  */

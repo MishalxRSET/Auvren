@@ -384,6 +384,36 @@ PRINTERS = _functions_that_print_a_foreign_field()
 # to-do: every one of them is a place where a session's own words DO reach a
 # string, and the argument is why that string is safe.
 EXEMPT = {
+    # The local (Ollama) brain. None of these builds a line for the brain out
+    # of a session's fields; they move the brain's OWN messages around.
+    "local_brain._chat": (
+        "it reads `content` off Ollama's stream — the local model's own reply "
+        "— and speaks it, exactly as `brain._handle` does for the Claude "
+        "brain's text deltas. Tool results reach the model already wrapped by "
+        "the server's handlers"),
+    "local_brain._run_turn": (
+        "it reads the `content` of messages it built itself (the user's "
+        "utterance, the held tool call) to keep the conversation history; "
+        "nothing is spoken from a session field"),
+    "local_brain.readback": (
+        "it speaks the arguments of a tool call the model composed on the "
+        "user's own, untainted turn — a call staged on a tainted turn is never "
+        "read back, it goes to the server's gate and is refused — and every "
+        "value goes through `_spoken` (one line, bounded) first. Driven in "
+        "tests/test_local_brain.py"),
+    "tray.set_state": (
+        "the `.title` it sets is the tray tooltip, built by `tray.tooltip` from "
+        "fixed strings, the user's own wake-phrase setting and a reason from "
+        "server._BRAIN_DOWN_SHORT, a fixed table; no session field reaches it"),
+    "tray.start": (
+        "the same tooltip as `tray.set_state`, for the icon's first paint"),
+    "wakeword.spoken_phrase": (
+        "the `.title` it reads is `str.title()` on the user's own WAKE_WORD "
+        "setting (a model name or the file name of his .onnx) — his "
+        "configuration, not a session's field, shown as the UI's hint"),
+    "local_brain.result": (
+        "`_LocalTurn.result` copies the turn's own spoken text into a "
+        "TurnResult, the same as `brain._Turn.result`"),
     "server._session_line": (
         "it prints `summary()` — another session's own words — with no "
         "escaping at all, and that is correct only because every caller puts "

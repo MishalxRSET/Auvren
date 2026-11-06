@@ -39,6 +39,8 @@ import re
 import shutil
 from dataclasses import dataclass
 
+import winplat
+
 log = logging.getLogger("jarvis.dialog")
 
 # --- outcomes ---------------------------------------------------------------
@@ -360,6 +362,11 @@ async def answer(pid: int, key: str) -> str:
         # get wrong.
         log.warning(f"refusing a key outside the vocabulary: {key!r}")
         return BAD_KEY
+    if winplat.IS_WINDOWS:
+        # Phase 2 of the Windows port: there is no Terminal.app tab to find
+        # by tty. NOT_FOUND presses nothing and tells the user the session
+        # is not in a window this can reach — which, today, is true.
+        return NOT_FOUND
     try:
         tty = await tty_for_pid_async(pid)
         if tty is None:

@@ -646,16 +646,22 @@ async def test_an_editor_that_will_not_start_is_reported(ready, monkeypatch):
     assert "wouldn't open" in out
 
 
-def test_vs_code_is_preferred_but_not_required(monkeypatch):
-    """Falls back to the system default, so this works on a Mac that has
-    never had VS Code installed."""
+def test_vs_code_is_preferred_but_not_required(monkeypatch, tmp_path):
+    """Falls back to Notepad / Explorer, so this works on a machine that has
+    never had VS Code installed. And never the `code.cmd` shim: Code.exe."""
     import actions
+    for var in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(actions.shutil, "which", lambda name: None)
-    monkeypatch.setattr(actions.os.path, "isdir", lambda p: False)
-    assert actions._vscode_command("/tmp/x") is None
+    assert actions._vscode_command("C:/x") is None
 
-    monkeypatch.setattr(actions.shutil, "which", lambda name: "/usr/bin/code")
-    assert actions._vscode_command("/tmp/x") == ["/usr/bin/code", "/tmp/x"]
+    install = tmp_path / "Microsoft VS Code"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "code.cmd").write_text("@echo off")
+    (install / "Code.exe").write_text("")
+    monkeypatch.setattr(actions.shutil, "which",
+                        lambda name: str(install / "bin" / "code.cmd"))
+    assert actions._vscode_command("C:/x") == [str(install / "Code.exe"), "C:/x"]
 
 
 # --- the cap, through the real channel ------------------------------------

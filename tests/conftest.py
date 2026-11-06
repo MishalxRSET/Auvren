@@ -6,8 +6,40 @@ import pytest_asyncio
 
 @pytest.fixture(autouse=True)
 def _never_spawn_a_real_brain(monkeypatch):
-    """server.lifespan builds the brain but must not start `claude` under test."""
+    """server.lifespan builds the brain but must not start `claude` under test.
+
+    And it builds the CLAUDE brain: the local (Ollama) brain is the default
+    for users, but the server suite was written against `Brain` and asserts
+    on it. Tests of the local brain construct `LocalBrain` themselves, or set
+    JARVIS_BRAIN=local.
+    """
     monkeypatch.setenv("JARVIS_BRAIN_AUTOSTART", "0")
+    monkeypatch.setenv("JARVIS_BRAIN", "claude")
+
+
+@pytest.fixture(autouse=True)
+def _no_wake_word_unless_asked(monkeypatch):
+    """The wake word is on by default for users, and while asleep Auvren
+    ignores what he hears. The voice tests were written for an assistant
+    that is always listening, so they get one; tests of the wake word set
+    WAKE_WORD themselves. It also keeps the suite off the real microphone.
+
+    `server.wake_gate` is built at import, and several fixtures reload the
+    server, so the module object's gate is switched off too, not only the
+    variable that a reload reads.
+    """
+    monkeypatch.setenv("WAKE_WORD", "off")
+    # Likewise on-device speech recognition: a machine with faster-whisper
+    # installed would otherwise open its real microphone under test.
+    monkeypatch.setenv("STT_ENGINE", "browser")
+    # And no tray icon: tests of it build one against a fake pystray.
+    monkeypatch.setenv("AUVREN_TRAY", "0")
+    import sys
+    server = sys.modules.get("server")
+    if server is not None and hasattr(server, "wake_gate"):
+        monkeypatch.setattr(server.wake_gate, "enabled", False)
+    if server is not None and hasattr(server, "STT_MODE"):
+        monkeypatch.setattr(server, "STT_MODE", "browser")
 
 
 @pytest.fixture(autouse=True)

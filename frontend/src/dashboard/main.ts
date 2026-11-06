@@ -46,7 +46,7 @@ function fmtCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** What a run actually consumed. Not dollars: JARVIS runs on the user's
+/** What a run actually consumed. Not dollars: Auvren runs on the user's
  * subscription and bills nobody, so the CLI's cost figure is a price list
  * for an API call that never happened. Tokens are the honest quantity. */
 function fmtRunTokens(run: RunRow): string {
@@ -99,10 +99,10 @@ function usageTone(pct: number): Tone {
 //
 //   LIMITS   how much of the five-hour and seven-day windows is gone, and
 //            when each one resets. The hero. It is the only place this can
-//            be seen, and it decides whether JARVIS can answer at all.
+//            be seen, and it decides whether Auvren can answer at all.
 //   TODAY    what is running right now, then the day's volume.
 //
-// There is no Spend. JARVIS runs on the user's Claude subscription — the
+// There is no Spend. Auvren runs on the user's Claude subscription — the
 // brain scrubs every ANTHROPIC_* variable so the CLI can never bill a key —
 // so the CLI's cost figure is the price of an API call nobody made. It used
 // to be the largest number on the page.
@@ -219,14 +219,14 @@ function renderUsage(snap: UsageSnapshot | null): void {
     if (!child.classList.contains("usage-gauge")) child.remove();
   }
 
-  // The provenance line. Absence of a reading is stated in words: JARVIS
+  // The provenance line. Absence of a reading is stated in words: Auvren
   // only learns its usage when the brain takes a turn, so a fresh start
   // genuinely knows nothing — and must not imply a full tank.
   if (!snap.measured) {
     m.usagePill.hidden = false;
     m.usagePill.textContent = "no reading";
     setTone(m.usagePill, "warn");
-    m.usageNote.textContent = "nothing measured since JARVIS started";
+    m.usageNote.textContent = "nothing measured since Auvren started";
   } else if (snap.stale) {
     m.usagePill.hidden = false;
     m.usagePill.textContent = "stale";
@@ -380,7 +380,7 @@ function paint(): void {
   renderInto(
     "history-list", "history-meta",
     runs.filter((r) => !ACTIVE.has(r.status)),
-    "No runs yet. Ask JARVIS to build something.",
+    "No runs yet. Ask Auvren to build something.",
   );
 }
 
@@ -409,7 +409,7 @@ async function reconcile(): Promise<void> {
     showBanner(null);
   } catch (e) {
     console.error("[dashboard] reconcile failed", e);
-    showBanner("Cannot reach the JARVIS server.");
+    showBanner("Cannot reach the Auvren server.");
   }
   await refreshUsage();
 }
@@ -481,7 +481,7 @@ function setupTabs(): void {
       // Same idea for Projects: no live socket, so a poll-on-open keeps a
       // stale "needs you" from sitting there after it's been answered.
       if (view === "projects") refreshProjects();
-      // Specs DOES have a socket, but a document JARVIS rewrote while the
+      // Specs DOES have a socket, but a document Auvren rewrote while the
       // tab was hidden is exactly what the user has come back to read: cost
       // one fetch rather than risk showing yesterday's words.
       if (view === "specs") refreshSpecs();
@@ -522,7 +522,7 @@ document.addEventListener("DOMContentLoaded", () => {
       appendEvent(runId, seq, kind, payload);
     },
     onConnectionChange: (connected) =>
-      showBanner(connected ? null : "Reconnecting to JARVIS…"),
+      showBanner(connected ? null : "Reconnecting to Auvren…"),
   });
 
   // Elapsed time ticks locally so active rows stay honest between frames.

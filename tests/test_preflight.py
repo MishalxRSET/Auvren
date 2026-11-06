@@ -381,19 +381,45 @@ def test_the_startup_check_never_takes_a_picture(monkeypatch):
     assert preflight._check_screen_recording_sync().status == STATUS_OK
 
 
-# --- FISH_API_KEY -------------------------------------------------------------
+# --- the voice (Piper by default, Fish optional) -------------------------------
 
-def test_fish_api_key_present(monkeypatch):
-    monkeypatch.setenv("FISH_API_KEY", "sk-fish-abc123")
-    check = preflight._check_fish_api_key_sync()
-    assert check.status == STATUS_OK
+def _piper_installed(tmp_path, monkeypatch):
+    exe = tmp_path / "piper.exe"
+    exe.write_text("")
+    model = tmp_path / "en_GB-alan-medium.onnx"
+    model.write_text("")
+    (tmp_path / "en_GB-alan-medium.onnx.json").write_text("{}")
+    monkeypatch.setenv("PIPER_PATH", str(exe))
+    monkeypatch.setenv("PIPER_MODEL", str(model))
 
 
-def test_fish_api_key_absent(monkeypatch):
+def test_voice_ok_with_piper_installed(monkeypatch, tmp_path):
+    monkeypatch.delenv("TTS_ENGINE", raising=False)
     monkeypatch.delenv("FISH_API_KEY", raising=False)
-    check = preflight._check_fish_api_key_sync()
+    _piper_installed(tmp_path, monkeypatch)
+    check = preflight._check_voice_sync()
+    assert check.status == STATUS_OK
+    assert "en_GB-alan-medium" in check.message
+
+
+def test_voice_fails_with_nothing_installed_and_says_how(monkeypatch, tmp_path):
+    for v in ("TTS_ENGINE", "FISH_API_KEY", "PIPER_PATH", "PIPER_MODEL"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(preflight.tts.shutil, "which", lambda name: None)
+    check = preflight._check_voice_sync()
     assert check.status == STATUS_FAIL
-    assert check.remedy
+    assert "get_piper.ps1" in check.remedy
+
+
+def test_voice_with_fish_selected_needs_the_key(monkeypatch):
+    monkeypatch.setenv("TTS_ENGINE", "fish")
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    check = preflight._check_voice_sync()
+    assert check.status == STATUS_FAIL
+    assert "FISH_API_KEY" in check.message
+    monkeypatch.setenv("FISH_API_KEY", "sk-fish-abc123")
+    assert preflight._check_voice_sync().status == STATUS_OK
 
 
 # --- leftover ANTHROPIC_* ------------------------------------------------------
@@ -523,7 +549,8 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     names = {c.name for c in results}
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "fish_api_key", "anthropic_key_leftover", "cross_session_inbound",
+        "voice", "local_brain", "wake_word", "speech_recognition",
+        "anthropic_key_leftover", "cross_session_inbound",
     }
 
 
@@ -532,7 +559,7 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
 def test_spoken_summary_empty_when_all_ok():
     checks = [
         Check(name="claude_cli", status=STATUS_OK, message="ok"),
-        Check(name="fish_api_key", status=STATUS_OK, message="ok"),
+        Check(name="voice", status=STATUS_OK, message="ok"),
     ]
     assert preflight.spoken_summary(checks) == ""
 
@@ -566,7 +593,8 @@ def test_spoken_summary_says_screen_recording_in_words_a_person_would_use():
 def test_spoken_summary_names_two_failures_and_matches_the_example():
     checks = [
         Check(name="claude_login", status=STATUS_FAIL, message="Claude Code is not logged in."),
-        Check(name="fish_api_key", status=STATUS_FAIL, message="FISH_API_KEY is not set."),
+        Check(name="voice", status=STATUS_FAIL,
+              message="TTS_ENGINE is fish but FISH_API_KEY is not set."),
     ]
     summary = preflight.spoken_summary(checks)
     assert summary == (
@@ -596,3 +624,112 @@ def test_spoken_summary_warn_counts_as_something_wrong():
     summary = preflight.spoken_summary(checks)
     assert summary != ""
     assert "One thing needs attention" in summary
+
+
+def test_spoken_summary_says_a_missing_piper_voice_plainly():
+    checks = [Check(name="voice", status=STATUS_FAIL,
+                    message="Piper is not installed (no piper.exe on PATH, PIPER_PATH unset).")]
+    assert "my voice isn't installed" in preflight.spoken_summary(checks)
+
+
+# --- the local brain (Ollama) -------------------------------------------------
+
+class _Resp:
+    def __init__(self, models):
+        self._models = models
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"models": [{"name": m} for m in self._models]}
+
+
+def test_local_brain_ok_when_ollama_has_the_model(monkeypatch):
+    import httpx
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setenv("OLLAMA_MODEL", "llama3.2")
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: _Resp(["llama3.2:latest"]))
+    assert preflight._check_local_brain_sync().status == STATUS_OK
+
+
+def test_local_brain_says_to_pull_a_missing_model(monkeypatch):
+    import httpx
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setenv("OLLAMA_MODEL", "qwen3:4b")
+    monkeypatch.setattr(httpx, "get", lambda url, timeout: _Resp([]))
+    check = preflight._check_local_brain_sync()
+    assert check.status == STATUS_FAIL and check.remedy == "Run: ollama pull qwen3:4b"
+    assert "my local model isn't downloaded" in preflight.spoken_summary([check])
+
+
+def test_local_brain_says_when_ollama_is_not_running(monkeypatch):
+    import httpx
+
+    def refused(url, timeout):
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setenv("JARVIS_BRAIN", "local")
+    monkeypatch.setattr(httpx, "get", refused)
+    check = preflight._check_local_brain_sync()
+    assert check.status == STATUS_FAIL and "ollama.com" in check.remedy
+    assert "Ollama isn't running" in preflight.spoken_summary([check])
+
+
+def test_local_brain_check_is_quiet_with_the_claude_brain(monkeypatch):
+    import httpx
+
+    def never(*a, **k):
+        raise AssertionError("no Ollama probe with the Claude brain")
+    monkeypatch.setenv("JARVIS_BRAIN", "claude")
+    monkeypatch.setattr(httpx, "get", never)
+    assert preflight._check_local_brain_sync().status == STATUS_OK
+
+
+# --- the wake word ----------------------------------------------------------------
+
+def test_wake_word_off_is_fine(monkeypatch):
+    monkeypatch.setenv("WAKE_WORD", "off")
+    assert preflight._check_wake_word_sync().status == STATUS_OK
+
+
+def test_wake_word_without_the_engine_warns_but_does_not_fail(monkeypatch):
+    import stt
+    import wakeword
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.setattr(stt, "mode", lambda: "browser")
+    monkeypatch.setattr(wakeword, "engine_problem",
+                        lambda: "The wake-word engine is not installed (openwakeword)")
+    check = preflight._check_wake_word_sync()
+    assert check.status == preflight.STATUS_WARN
+    assert "requirements-wakeword.txt" in check.remedy
+
+
+def test_wake_word_heard_by_on_device_recognition_is_fine(monkeypatch):
+    import stt
+    import wakeword
+    monkeypatch.delenv("WAKE_WORD", raising=False)
+    monkeypatch.setattr(wakeword, "engine_problem", lambda: "no trained model yet")
+    monkeypatch.setattr(stt, "mode", lambda: "local")
+    check = preflight._check_wake_word_sync()
+    assert check.status == STATUS_OK and "Hey Auvren" in check.message
+
+
+def test_speech_recognition_states(monkeypatch):
+    import stt
+    monkeypatch.setattr(stt, "engine_problem", lambda: None)
+    monkeypatch.setenv("STT_ENGINE", "auto")
+    assert preflight._check_speech_recognition_sync().status == STATUS_OK
+    monkeypatch.setattr(stt, "engine_problem", lambda: "not installed")
+    assert preflight._check_speech_recognition_sync().status == STATUS_OK, \
+        "not installed and not asked for: the browser listens"
+    monkeypatch.setenv("STT_ENGINE", "local")
+    check = preflight._check_speech_recognition_sync()
+    assert check.status == preflight.STATUS_WARN and "requirements-stt.txt" in check.remedy
+
+
+def test_wake_word_ready(monkeypatch):
+    import wakeword
+    monkeypatch.setenv("WAKE_WORD", "hey_jarvis")
+    monkeypatch.setattr(wakeword, "engine_problem", lambda: None)
+    check = preflight._check_wake_word_sync()
+    assert check.status == STATUS_OK and "Hey Jarvis" in check.message

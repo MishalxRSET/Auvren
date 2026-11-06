@@ -1,31 +1,66 @@
-# JARVIS — Voice AI Assistant
+# Auvren — Voice AI Assistant for Windows
 
 ## Overview
-JARVIS (Just A Rather Very Intelligent System) is a voice-first AI assistant for macOS. It runs locally on your machine, driving Claude Code for development tasks — every execution recorded as a *run* and watchable at `/dashboard`.
+Auvren is a voice-first AI assistant for **Windows**, in the style of JARVIS.
+It began as `ethanplusai/jarvis` (macOS) and is being rebuilt for Windows and
+merged with an offline design (local Ollama brain, Piper voice, wake word —
+the owner's "Auvren Build Plan"). Today it runs locally, thinks with a local
+model under Ollama (or, with `JARVIS_BRAIN=claude`, a Claude Code process),
+speaks with Piper, and hands development tasks to Claude Code — every
+execution recorded as a *run* and watchable at `/dashboard`.
+
+Internal identifiers still say jarvis — module names (`jarvis_mcp.py`,
+`jarvis_memory.py`), `JARVIS_*` environment variables, the data layout — so
+an existing `.env` and data folder keep working. User-facing text says Auvren.
+
+**Windows port status.** Phase 1 (done): startup, the run pipeline, session
+watching, voice, the dashboard, opening Windows Terminal / Chrome / VS Code,
+toast notifications. Phase 2 (not yet): `screen.py` (screenshots, window
+list), `dialog.py` (answering a prompt by keystroke) and `session_steer.py`
+(messaging another session) refuse on Windows with a spoken sentence. Their
+macOS internals are still in those files, unreachable on Windows, until
+phase 2 replaces them. Nothing here has been run on real Windows by the
+author of the port; the suite runs on Linux with Win32 faked at the seams.
 
 ## Quick Start
 Read `skills/jarvis-setup/SKILL.md` first — it carries setup and debugging
 facts (mic-in-Chrome-only, the per-port permission trap, subscription vs. API
-key, what an expired login sounds like, Accessibility) that were only learned
-by hitting them live, and this walkthrough assumes them.
+key, what an expired login sounds like) that were only learned by hitting
+them live, and this walkthrough assumes them. It was written on macOS: its
+Accessibility and Terminal.app sections do not apply on Windows.
 
 When a user clones this repo and starts Claude Code, help them:
 1. Copy .env.example to .env
-2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-   newer) and log in with `claude` — JARVIS's brain runs on your Claude
-   subscription, not on an API key
-3. Get a Fish Audio API key from fish.audio (required — there is no fallback
-   voice)
-4. Install Python dependencies: pip install -r requirements.txt
+2. Install Ollama (ollama.com) and pull the brain's model:
+   `ollama pull qwen3:4b` (or set `OLLAMA_MODEL`). Then install Claude Code
+   (2.1.224 or newer) and log in with `claude` — coding runs, and the brain
+   too with `JARVIS_BRAIN=claude`, use your Claude subscription, not an API
+   key
+3. Install the voice (Piper, offline, free):
+   `powershell -ExecutionPolicy Bypass -File scripts\get_piper.ps1`
+   — it downloads piper.exe and the en_GB-alan-medium voice into
+   `data\piper\` and speaks a test sentence. Fish Audio is optional
+   (`TTS_ENGINE=fish` + `FISH_API_KEY`).
+   On Windows npm's `claude.cmd` is refused as a launcher (see `winplat.py`);
+   use the native installer (`irm https://claude.ai/install.ps1 | iex`) or set
+   `JARVIS_CLAUDE_PATH` to `claude.exe`.
+4. Install Python dependencies: pip install -r requirements.txt — and, for
+   speech recognition on the laptop, `pip install -r requirements-stt.txt`
+   then `python stt.py --setup` (downloads base.en, lists mics)
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
-7. Generate the SSL certs — see below, they are NOT optional:
+7. Generate the SSL certs — see below, they are NOT optional (Git for
+   Windows ships `openssl`, in Git Bash):
    `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'`
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
-11. Click to enable audio, speak to JARVIS
+11. Click to enable audio, then say "Hey Auvren" (OV-ren) and speak
+
+Do not pass `--reload` on Windows: uvicorn's reloader installs an event loop
+that cannot start subprocesses, so the brain and every run would fail.
+`server.py` ignores the flag there and says so.
 
 **The certs are required for the dev-server workflow**, despite `server.py`
 treating them as optional. `server.py` serves HTTPS only when `cert.pem` and
@@ -40,10 +75,67 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Backend**: FastAPI + Python (server.py, ~5800 lines)
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
-- **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
-  the user's subscription; no Anthropic API calls on the voice path
-- **TTS**: Fish Audio with JARVIS voice model
-- **System**: AppleScript for Terminal and Chrome integration
+- **AI**: one of two brains, chosen by `JARVIS_BRAIN`:
+  - `local` (default) — `local_brain.py`: a local model under Ollama
+    (`qwen3:4b` by default), streamed from `/api/chat` over `httpx`. Its
+    tools run IN-PROCESS through `server.run_tool_call`, the same gate
+    `/internal/tool` uses, so origin/taint/memory-writer rules apply
+    unchanged. It is offered only `local_brain.LOCAL_TOOLS` (enforced in
+    the brain, not just the prompt), and `CONFIRM_TOOLS` (`spawn_run`,
+    `cancel_run`, `create_project`) are never run on the turn the model
+    asks: code reads the exact arguments back and the next utterance must
+    be a plain yes. Coding work goes to Claude Code via `spawn_run`.
+  - `claude` — `brain.py`: a long-lived Claude Code process (Sonnet by
+    default) on the user's subscription; no Anthropic API calls on the voice
+    path
+- **Speech recognition**: Chrome's Web Speech API (`STT_ENGINE=browser`) or
+  ON THE LAPTOP (`stt.py`, used automatically once installed): `mic.MicHub`
+  opens the microphone once and fans 80 ms frames out to the wake engine and
+  `LocalEars` (energy VAD -> `Segmenter` -> faster-whisper base.en int8 on a
+  worker thread). Its transcripts enter `_on_final_transcript` — the same
+  path, gate, echo filter and brain a browser transcript takes; browser
+  transcripts are ignored while it runs. The ears PAUSE while Auvren speaks
+  (no echo cancellation on a raw mic), driven by `_voice_emit`'s status
+  frames; the wake engine (if any) keeps listening and barges in. Whisper
+  is primed (`hotwords`) with "Auvren" and the project names. Optional deps
+  in `requirements-stt.txt`; the suite pins `STT_ENGINE=browser`
+- **Wake word** (`wakeword.py`, on by default): "Hey Auvren" (OV-ren).
+  Auvren is asleep until addressed. `WakeGate` is consulted where transcripts arrive in
+  `/ws/voice` — asleep, a final is ignored and an interim never barges in.
+  Awake = the wake word's window, OR held while he thinks/speaks (driven by
+  the status frames `_voice_emit` sends), OR the follow-up window after he
+  finishes, so a confirmation "yes" needs no second wake word. No
+  pretrained model exists for "hey auvren", so it is matched in the
+  TRANSCRIPT (`strip_wake_phrase`, with the measured mishearings "overn",
+  "oven" accepted only after a greeting); the voice says the name via
+  `tts.say_as` ("Ovren"). The audio engine (`WakeListener`: openWakeWord on
+  the shared mic) runs only for a pretrained name (`WAKE_WORD=hey_jarvis`)
+  or a trained `<data>/wakeword/hey_auvren*.onnx`, and is OPTIONAL — `requirements-wakeword.txt`,
+  kept out of requirements.txt because it pulls onnxruntime/scipy/sklearn
+  (and tflite on Linux). Without it, a transcript that opens with the wake
+  phrase still wakes him. The browser gets `wake` frames for the orb
+- **Background / summon**: `server.py --background` (run by
+  `scripts/install_autostart.ps1` as `pythonw` at sign-in) serves the built
+  page over loopback HTTP and logs to `<data>/logs/`. When the wake word (or
+  a request) is heard with NO voice client connected, `_summon_app` opens
+  Auvren's own window (`actions.open_app_window`: Chrome, else Edge,
+  `--app=` on a profile in `<data>/app-window` so
+  `--autoplay-policy=no-user-gesture-required` takes effect; loopback URLs
+  only), holds the gate open, and keeps a same-breath request. The page
+  plays its intro (`frontend/src/intro.ts`, `?summoned=1`) and sends
+  `hello`; `_answer_summon` then says "Yes, sir?" or answers the request
+- **Tray** (`tray.py`, Windows, optional `requirements-tray.txt`): pystray
+  on its own thread (`run_detached`), the icon painted in code with Pillow
+  per state (`server._tray_state`: down > muted > thinking/speaking > awake
+  > asleep), refreshed from the same status frames, wake events, mute and
+  brain-state callbacks. Menu actions run on the tray's thread and are
+  handed to the loop; Quit raises SIGINT so uvicorn shuts down cleanly.
+  "Start with Windows" writes the same Startup shortcut as
+  `install_autostart.ps1` (fixed PowerShell script, paths via env)
+- **TTS**: Piper by default (offline, one `piper.exe` per sentence chunk, text
+  on stdin, WAV out); Fish Audio optional (`tts.py`)
+- **System**: Windows Terminal, Chrome/Firefox, VS Code exec'd directly —
+  never through `cmd.exe` (`actions.py`); every Win32 seam in `winplat.py`
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
   `run_store.py` (SQLite) + `run_executor.py`, surfaced at `/api/runs`,
   `/ws/runs`, and the `/dashboard` UI
@@ -82,13 +174,39 @@ arbitrary LLM and file content, so everything goes through
 
 ## Key Files
 - `server.py` — Main server, WebSocket handler, HTTP API, action system
-- `brain.py` — The voice brain: one long-lived `claude -p` process on the
-  user's Claude subscription, fed over stdin as stream-json
+- `local_brain.py` — The default brain: a local Ollama model, the tool
+  allowlist, spoken confirmation for consequential tools, auto-recovery
+  when Ollama comes up late. Drop-in for `Brain` as far as server.py is
+  concerned (same turn/ready/origin/taint surface)
+- `brain.py` — The Claude brain (`JARVIS_BRAIN=claude`): one long-lived
+  `claude -p` process on the user's Claude subscription, fed over stdin as
+  stream-json
 - `jarvis_mcp.py` — Stdio MCP server exposing JARVIS's tools to the brain;
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
-- `tts.py` — Fish Audio synthesis, one request per sentence chunk
+- `mic.py` — `MicHub`: one microphone capture, fanned out to every listener
+- `frontend/src/intro.ts` — The intro over the orb; longer when summoned
+- `tray.py` — The tray icon: state icons, menu, Start-with-Windows shortcut
+- `scripts/install_autostart.ps1` — Background start at Windows sign-in
+- `stt.py` — On-device speech recognition: `EnergyVAD`, `Segmenter`,
+  `Transcriber` (faster-whisper), `LocalEars`, `python stt.py --setup`
+- `models/wakeword/hey_auvren_v0.1.onnx` — The trained "Hey Auvren" model
+  (`scripts/train_wakeword.py`; synthetic voices only). Held-out: ~80% recall
+  on unseen voices, 0.37 false wakes/hour on the half of openWakeWord's
+  validation stream the threshold was not chosen on, 55/60 in a live
+  runtime stream with none false. Not trusted alone (`engine_trusted`)
+- `scripts/train_wakeword.py` — Retrains it (`requirements-train.txt`)
+- `wakeword.py` — The wake word: `WakeGate` (pure window/hold/follow-up
+  state), `strip_wake_phrase`, `WakeListener` (openWakeWord on the mic,
+  optional deps), `python wakeword.py --setup`
+- `tts.py` — Speech synthesis: Piper (default) or Fish Audio, one call per
+  sentence chunk; `engine()` says which
+- `winplat.py` — Every Win32 seam: `pid_alive` (never `os.kill(pid, 0)`,
+  which TERMINATES on Windows), `kill_tree` (`taskkill /T /F`),
+  `claude_argv` (resolves npm's `claude.cmd` to the real program, or
+  refuses — cmd.exe would re-parse the brain's system prompt), reparse
+  points, System32 paths
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
@@ -106,24 +224,30 @@ arbitrary LLM and file content, so everything goes through
 - `session_watch.py` — Watches every Claude Code session on the machine
   (process / conversation / project)
 - `session_steer.py` — Sends a message into a running session's inbox socket
-- `dialog.py` — Answers a permission prompt in a Terminal window by sending
-  it a keystroke (needs Accessibility)
-- `notifier.py` — macOS notification fallback when no browser tab is
+  (Unix socket; returns `failed` on Windows until phase 2)
+- `dialog.py` — Answers a permission prompt by sending one keystroke
+  (macOS Terminal.app only; returns `not_found` on Windows until phase 2)
+- `notifier.py` — Windows toast fallback (fixed PowerShell script, untrusted
+  text only in environment variables) when no browser tab is
   connected to speak through
 - `jarvis_memory.py` — Long-term memory: a folder of plain Markdown files the
   user can read and edit directly, not a database
 - `usage_store.py` — Tracks the subscription's five-hour / seven-day
   rate-limit usage (there is no spend to report — see brain.py)
-- `preflight.py` — First-run environment checks: `claude` CLI/login,
-  Accessibility, Fish key, cross-session steering
+- `preflight.py` — First-run environment checks: Ollama and its model (local
+  brain), `claude` CLI/login, the voice, cross-session steering (and the
+  macOS-only Accessibility/Screen Recording checks off Windows)
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
-- `actions.py` — System actions (Terminal, Chrome) via AppleScript
+- `actions.py` — System actions: Windows Terminal (PowerShell fallback),
+  Chrome/Firefox by their own exe, VS Code as `Code.exe` (Notepad/Explorer
+  fallback). Every program exec'd directly with argv, never via `cmd.exe`
 - `browser.py` — Playwright. Only the headless half is live (`read_page`,
   `capture_page`, behind `read_page` / `look_at_page`); the headful
   `JarvisBrowser` search/research class is reachable from nothing but
   `tests/test_browser_integration.py`
-- `screen.py` — Seeing the Mac itself: the window list (`osascript`) and one
+- `screen.py` — Seeing the screen (refuses on Windows until phase 2; the
+  macOS path below is still in the file): the window list (`osascript`) and one
   downscaled `screencapture` the brain sees as an MCP image block. Captured
   only on a turn the user drove, never persisted, never on a timer
 - `repo_read.py` — Cheap, model-free reading of a repository (no `claude`
@@ -154,14 +278,44 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   never bill an API key instead, and `preflight.py`'s `anthropic_key_leftover`
   check warns you if one is sitting in your `.env` — that is the only place
   the name appears in live code.
-- `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the brain,
-  always passed explicitly as `--model`
+- `JARVIS_BRAIN` (optional, default `local`) — `local` (Ollama) or `claude`.
+  The test suite pins `claude` in `tests/conftest.py`, so no test talks to a
+  real Ollama; local-brain tests build `LocalBrain` against a fake one
+- `OLLAMA_MODEL` (default `qwen3:4b`), `OLLAMA_HOST` (default
+  `127.0.0.1:11434`; a bind-all `0.0.0.0` is dialled as loopback),
+  `OLLAMA_NUM_CTX` (8192), `OLLAMA_KEEP_ALIVE` (`30m`) — the local brain
+- `HONORIFIC` (optional, default `sir`) — how Auvren addresses the user
+- `STT_ENGINE` (`auto` default: on-device when installed; `local`;
+  `browser`), `STT_MODEL` (`base.en`), `STT_LISTEN_WHILE_SPEAKING`,
+  `STT_VAD_MIN_RMS` (400), `STT_BEAM_SIZE` (1), `STT_THREADS`,
+  `STT_LANGUAGE` (`en`), `MIC_DEVICE` (index or name; `WAKE_DEVICE` is the
+  older spelling)
+- `AUVREN_TRAY` (default on where installed; the suite pins `0`)
+- `AUVREN_SUMMON` (default on; `0` never opens a window on the wake word),
+  `AUVREN_APP_URL` (where that window points; default this server's built
+  page, else the Vite dev server)
+- `WAKE_WORD` (default `hey_auvren`; `off` disables; `hey_jarvis`; or a path to a custom
+  `.onnx`), `WAKE_THRESHOLD` (0.5), `WAKE_WINDOW_SEC` (8),
+  `WAKE_FOLLOW_UP_SEC` (8), `WAKE_DEVICE` (mic index or name). The suite
+  pins `WAKE_WORD=off` in `tests/conftest.py` (the voice tests predate it,
+  and no test may open the real microphone)
+- `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the Claude
+  brain, always passed explicitly as `--model`
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
   rejection is not enough with a given microphone
-- `FISH_API_KEY` (required) — Fish Audio TTS
-- `FISH_VOICE_ID` (optional) — Voice model ID
+- `TTS_ENGINE` (optional) — `piper` or `fish`. Unset: Piper if installed,
+  else Fish if `FISH_API_KEY` is set, else Piper (and preflight says what is
+  missing)
+- `PIPER_PATH` / `PIPER_MODEL` (optional) — piper.exe and the voice's
+  `.onnx` (its `.onnx.json` must sit beside it). Unset, they are found in
+  `<data>\piper\` where `scripts\get_piper.ps1` puts them. Deliberately
+  NOT writable through the settings API: `PIPER_PATH` names a program
+- `PIPER_LENGTH_SCALE`, `PIPER_SPEAKER`, `PIPER_MAX_PARALLEL` (optional) —
+  speaking rate, speaker of a multi-speaker voice, models loaded at once (2)
+- `FISH_API_KEY` (optional) — Fish Audio TTS, only with `TTS_ENGINE=fish`
+- `FISH_VOICE_ID` (optional) — Fish voice model ID
 - `USER_NAME` (optional) — Your name for JARVIS to use
 - `JARVIS_DATA_DIR` (optional) — Where JARVIS writes everything: the SQLite
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`
@@ -199,8 +353,10 @@ the file) because it drives `browser.py`, which launches Chromium with
 `headless=False` on purpose and runs live searches. Run those with
 `pytest -m browser`; they skip themselves if there is no network.
 
-Everything else uses fakes at the subprocess seam — `screencapture`, `sips`,
-`osascript` and `claude` are never really invoked. If you add a test that
+Everything else uses fakes at the subprocess seam — `piper`, `powershell`,
+`taskkill`, `wt`, `claude` (and the macOS `screencapture`/`sips`/`osascript`
+still in phase-2 files) are never really invoked; Win32 calls are faked in
+`winplat`. The suite runs on Linux or Windows. If you add a test that
 needs the network, a real window, or a real `claude`, mark it.
 
 ## Conventions
@@ -210,7 +366,8 @@ needs the network, a real window, or a real `claude`, mark it.
   `/internal/tool`), not by parsing `[ACTION:X]` tags out of its reply — that
   tag machinery is gone in full, including the last handler (`_execute_browse`),
   which lost its caller with the voice dispatch chain
-- AppleScript for Terminal and Chrome control (no OAuth needed)
+- Programs are exec'd directly with argv — never `shell=True`, `start`,
+  `os.startfile` on a file that could be a script, or a `.cmd`/`.bat` shim
 - SQLite for runs, run events and usage (`run_store.py`, `usage_store.py`);
   long-term memory is plain Markdown files instead (`jarvis_memory.py`) —
   the user edits it directly, so it is never a database

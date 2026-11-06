@@ -1,5 +1,5 @@
 /**
- * JARVIS — Main entry point.
+ * Auvren — Main entry point.
  *
  * Wires together the orb visualization, WebSocket communication,
  * speech recognition, and audio playback into a single experience.
@@ -9,6 +9,7 @@ import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer, createMicMonitor } from "./voice";
 import { createSocket } from "./ws";
 import { openSettings, checkFirstTimeSetup } from "./settings";
+import { playIntro } from "./intro";
 import "./style.css";
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,44 @@ import "./style.css";
 type State = "idle" | "listening" | "thinking" | "speaking" | "compacting";
 let currentState: State = "idle";
 let isMuted = false;
+
+// The wake word (server-side; see wakeword.py). While asleep the orb rests at
+// "idle" and the status line says what to say. The server sends the state in
+// the `config` frame and a `wake` frame whenever it changes.
+let wakeEnabled = false;
+let awake = true;
+let wakePhrase = "Hey Auvren";
+
+// Who turns speech into text. "local": the server listens on this machine
+// (stt.py) and Chrome's recogniser stays off — otherwise every request would
+// arrive twice. "browser": Chrome's Web Speech API, as before.
+let sttMode: "local" | "browser" = "browser";
+let voiceStarted = false;
+let kickedOff = false;
+
+function setSttMode(mode: unknown) {
+  sttMode = mode === "local" ? "local" : "browser";
+  if (sttMode === "local") {
+    if (voiceStarted) voiceInput.stop();
+    voiceStarted = false;
+  } else if (kickedOff && !voiceStarted && !isMuted) {
+    startBrowserListening();
+  }
+}
+
+/** Chrome's recogniser, and the level meter that watches it. Only in
+ *  "browser" mode: on-device the page never touches the microphone, so a
+ *  window opened by the wake word does not stop to ask for it. */
+function startBrowserListening() {
+  if (!micMonitor) micMonitor = createMicMonitor(onMicLevel, onMicEvent);
+  voiceInput.start();
+  voiceStarted = true;
+}
+
+/** Where the orb settles when nothing is happening. */
+function restingState(): State {
+  return isMuted || (wakeEnabled && !awake) ? "idle" : "listening";
+}
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -31,8 +70,9 @@ function showError(msg: string) {
 }
 
 function updateStatus(state: State) {
+  const asleep = wakeEnabled && !awake && !isMuted;
   const labels: Record<State, string> = {
-    idle: "",
+    idle: asleep ? `say “${wakePhrase}”` : "",
     listening: "listening...",
     thinking: "thinking...",
     speaking: "",
@@ -80,11 +120,11 @@ function transition(newState: State) {
 const voiceInput = createVoiceInput(
   (text: string) => {
     // The server decides whether this is echo, a barge-in, or a new turn.
-    micMonitor.sawSpeech();
+    micMonitor?.sawSpeech();
     socket.send({ type: "transcript", text, isFinal: true });
   },
   (text: string) => {
-    micMonitor.sawSpeech();
+    micMonitor?.sawSpeech();
     socket.send({ type: "interim", text });
   },
   (msg: string) => {
@@ -106,20 +146,21 @@ micDot.id = "mic-level";
 micDot.title = "microphone input";
 document.body.appendChild(micDot);
 
-const micMonitor = createMicMonitor(
-  (level: number) => {
-    const pct = Math.min(100, Math.round(level * 900));
-    micDot.style.setProperty("--level", `${pct}%`);
-    micDot.classList.toggle("is-hot", level > 0.02);
-  },
-  (event: string) => {
-    socket.send({ type: "mic", text: event });
-    // Proven deaf: sound going in, nothing coming out. Do not wait for the
-    // rotation timer to happen along — measured once at 21 seconds, all of
-    // it lost. Rebuild the recogniser now.
-    if (event.startsWith("DEAF")) voiceInput.restart("deaf: audio in, no results");
-  }
-);
+function onMicLevel(level: number) {
+  const pct = Math.min(100, Math.round(level * 900));
+  micDot.style.setProperty("--level", `${pct}%`);
+  micDot.classList.toggle("is-hot", level > 0.02);
+}
+
+function onMicEvent(event: string) {
+  socket.send({ type: "mic", text: event });
+  // Proven deaf: sound going in, nothing coming out. Do not wait for the
+  // rotation timer to happen along — measured once at 21 seconds, all of
+  // it lost. Rebuild the recogniser now.
+  if (event.startsWith("DEAF")) voiceInput.restart("deaf: audio in, no results");
+}
+
+let micMonitor: ReturnType<typeof createMicMonitor> | null = null;
 
 // ── stopping him ──────────────────────────────────────────────────────────
 // Escape, or the button that appears while he is talking. Not a spoken word:
@@ -139,7 +180,7 @@ function hush() {
   // Locally first: the round trip is real and silence should be instant.
   audioPlayer.stop();
   socket.send({ type: "hush" });
-  transition(isMuted ? "idle" : "listening");
+  transition(restingState());
 }
 
 hushBtn.addEventListener("click", hush);
@@ -160,6 +201,63 @@ audioPlayer.onNeedsGesture(() => {
 });
 
 // ---------------------------------------------------------------------------
+// The intro, and being summoned
+// ---------------------------------------------------------------------------
+
+// The wake word opened this window (the server launched it with ?summoned=1).
+// Once the intro has played AND the server is connected, say so: the server
+// then asks "Yes, sir?" — or answers what was said in the same breath as the
+// wake word — instead of greeting.
+const summoned = new URLSearchParams(window.location.search).has("summoned");
+let introDone = false;
+let serverReady = false;
+let helloSent = false;
+
+function maybeHello() {
+  if (!summoned || helloSent || !introDone || !serverReady) return;
+  helloSent = true;
+  socket.send({ type: "hello", summoned: true });
+}
+
+playIntro(summoned).then(() => {
+  introDone = true;
+  maybeHello();
+});
+
+// ---------------------------------------------------------------------------
+// The wake word
+// ---------------------------------------------------------------------------
+
+function applyWake(w: Record<string, unknown>, cue: boolean) {
+  wakeEnabled = Boolean(w.enabled);
+  awake = !wakeEnabled || Boolean(w.awake);
+  if (typeof w.phrase === "string" && w.phrase) wakePhrase = w.phrase;
+  if (cue && awake) wakeChime();
+  if (currentState === "idle" || currentState === "listening") {
+    transition(restingState());
+    updateStatus(currentState);   // the hint changes even when the state does not
+  }
+}
+
+/** A short rising chirp: "I heard you", without words to talk over. */
+function wakeChime() {
+  const ctx = audioPlayer.getAnalyser().context as AudioContext;
+  if (ctx.state !== "running") return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const t = ctx.currentTime;
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(880, t);
+  osc.frequency.exponentialRampToValueAtTime(1320, t + 0.12);
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.06, t + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket messages
 // ---------------------------------------------------------------------------
 
@@ -168,16 +266,27 @@ socket.onMessage((msg) => {
 
   if (type === "config") {
     muteMicDuringSpeech = Boolean(msg.muteMicDuringSpeech);
+    if (msg.wake && typeof msg.wake === "object") applyWake(msg.wake as Record<string, unknown>, false);
+    setSttMode(msg.stt);
+    serverReady = true;
+    maybeHello();
+  } else if (type === "stt") {
+    setSttMode(msg.mode);
+  } else if (type === "mute") {
+    // From the tray, or another open tab: follow it, without echoing back.
+    setMuted(Boolean(msg.muted), false);
+  } else if (type === "wake") {
+    applyWake(msg, Boolean(msg.cue));
   } else if (type === "audio") {
     const data = msg.data as string;
     if (data) {
       if (currentState !== "speaking") transition("speaking");
       audioPlayer.enqueue(data, Number(msg.utt), Number(msg.idx));
     }
-    if (msg.text) console.log("[JARVIS]", msg.text);
+    if (msg.text) console.log("[Auvren]", msg.text);
   } else if (type === "stop") {
     audioPlayer.stop();
-    transition(isMuted ? "idle" : "listening");
+    transition(restingState());
   } else if (type === "drop_queued") {
     audioPlayer.dropQueued();
   } else if (type === "status") {
@@ -185,10 +294,10 @@ socket.onMessage((msg) => {
     if (state === "thinking") transition("thinking");
     else if (state === "speaking") transition("speaking");
     else if (state === "compacting") transition("compacting");
-    else if (state === "idle") transition(isMuted ? "idle" : "listening");
+    else if (state === "idle") transition(restingState());
   } else if (type === "text") {
     // A chunk TTS could not voice: show it instead of losing it
-    console.log("[JARVIS]", msg.text);
+    console.log("[Auvren]", msg.text);
     statusEl.textContent = String(msg.text);
   } else if (type === "notice") {
     // Shown, never spoken. The server sends one when it is about to be busy
@@ -206,8 +315,9 @@ socket.onMessage((msg) => {
 
 // Start listening after a brief delay for the orb to render
 setTimeout(() => {
-  voiceInput.start();
-  if (currentState !== "speaking") transition("listening");
+  kickedOff = true;
+  if (sttMode === "browser" && !voiceStarted) startBrowserListening();
+  if (currentState !== "speaking") transition(restingState());
 }, 1000);
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
@@ -234,17 +344,24 @@ const menuDropdown = document.getElementById("menu-dropdown")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
 
-btnMute.addEventListener("click", (e) => {
-  e.stopPropagation();
-  isMuted = !isMuted;
+function setMuted(muted: boolean, tellServer: boolean) {
+  if (muted === isMuted && !tellServer) return;
+  isMuted = muted;
   btnMute.classList.toggle("muted", isMuted);
+  // The server's own microphone (on-device ears, wake engine) mutes too.
+  if (tellServer) socket.send({ type: "mute", muted: isMuted });
   if (isMuted) {
     voiceInput.pause();
     transition("idle");
   } else {
     voiceInput.resume();
-    transition("listening");
+    transition(restingState());
   }
+}
+
+btnMute.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setMuted(!isMuted, true);
 });
 
 btnMenu.addEventListener("click", (e) => {
@@ -272,7 +389,7 @@ btnRestart.addEventListener("click", async (e) => {
 btnFixSelf.addEventListener("click", (e) => {
   e.stopPropagation();
   menuDropdown.style.display = "none";
-  // Activate work mode on the WebSocket session (JARVIS becomes Claude Code's voice)
+  // Activate work mode on the WebSocket session (Auvren becomes Claude Code's voice)
   // Milestone 1 has no tools yet; "Fix yourself" returns as a brain tool later.
   statusEl.textContent = "fix-yourself is not available in this build";
 });

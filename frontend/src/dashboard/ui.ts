@@ -1,5 +1,5 @@
 /**
- * JARVIS dashboard — primitive builders.
+ * Auvren dashboard — primitive builders.
  *
  * The TS half of the design system: one function per primitive in
  * `theme/primitives.css`, so every view produces identical markup and a

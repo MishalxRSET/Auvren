@@ -717,8 +717,8 @@ def terminal(monkeypatch):
     import actions
     opened: list[str] = []
 
-    async def fake_open_terminal(command=""):
-        opened.append(command)
+    async def fake_open_terminal(cwd=None, command=None):
+        opened.append((cwd, command))
         return {"success": True, "confirmation": "Terminal is open, sir."}
 
     monkeypatch.setattr(actions, "open_terminal", fake_open_terminal)
@@ -763,8 +763,8 @@ async def test_performing_the_command_reads_it_back_before_running_it(
     assert "npm run dev" in speech.said[0]
     assert "chitauri" in speech.said[0]
     assert len(terminal) == 1
-    assert terminal[0].endswith("&& npm run dev")
-    assert str(project) in terminal[0], "it runs in the project directory"
+    assert terminal[0] == (str(project), "npm run dev"), \
+        "it runs in the project directory, as its own argument"
     assert store.list_steers(limit=5)[0]["outcome"] == "ran"
     assert server._staged_steers == []
 

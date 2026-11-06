@@ -1,0 +1,12 @@
+# Optional: speech recognition on this machine (faster-whisper), instead of
+# Chrome's online recogniser. With it the microphone never leaves the laptop,
+# any browser works, and "Hey Auvren" is heard locally.
+#
+#   pip install -r requirements-stt.txt
+#   python stt.py --setup             # downloads base.en (~145 MB), lists mics
+#
+# Kept out of requirements.txt: ctranslate2, onnxruntime and PyAV are large,
+# and CI and the test suite need none of them.
+faster-whisper==1.2.1
+sounddevice>=0.4.6
+numpy>=1.24

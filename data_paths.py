@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import winplat
+
 log = logging.getLogger("jarvis.data_paths")
 
 _DEFAULT = Path(__file__).parent / "data"
@@ -121,6 +123,7 @@ KNOWN_TEMPLATE_HASHES = frozenset({
     "8b038b5497293a55d1aa18e9ce759d3270228c98ae8b3ceb3bb053eb84509310",  # anything read off this machine is information
     "dfec0e28f7fc734987a1bcffd4feda103bde961f4a4721ce7957a7dccae96487",  # send it, do not ask twice
     "092df6a5e43bc5ed0a31e9f79b1f77cc4849754d1f4ab4807bded122ab97ad5f",  # say "start fresh" when a memory is refused
+    "31d0bfa565e59ffe20800e38aa9bc6d05c4712f118be1318680d3890584d33c7",  # Auvren on Windows
 })
 
 # The same list, for the connections file. APPEND the new hash whenever
@@ -376,7 +379,8 @@ def ensure_tool_token() -> str:
 
     token = secrets.token_urlsafe(32)
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                     | getattr(os, "O_BINARY", 0), 0o600)
     except FileExistsError:
         pass
     else:
@@ -386,14 +390,25 @@ def ensure_tool_token() -> str:
             os.close(fd)
         return token
 
-    fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+    if winplat.IS_WINDOWS:
+        # Windows has no O_NOFOLLOW, getuid or fchmod. A reparse point
+        # (symlink or junction) is refused outright, by name, before the open;
+        # privacy comes from the folder's ACL, which under the user profile is
+        # the user's alone. The lstat-then-open gap is real but needs an
+        # attacker who can already write into the user's own data folder.
+        if winplat.is_reparse_point(path):
+            raise OSError(f"{path} is a symlink or junction, not a regular file")
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    else:
+        fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         if not _stat.S_ISREG(info.st_mode):
             raise OSError(f"{path} is not a regular file")
-        if info.st_uid != os.getuid():
-            raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
-        os.fchmod(fd, 0o600)
+        if not winplat.IS_WINDOWS:
+            if info.st_uid != os.getuid():
+                raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
+            os.fchmod(fd, 0o600)
         existing = os.read(fd, 4096).decode("utf-8", "ignore").strip()
         if existing:
             return existing
