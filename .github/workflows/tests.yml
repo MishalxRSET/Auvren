@@ -19,6 +19,8 @@ name: tests
 on:
   push:
   pull_request:
+  # Run it by hand from the Actions tab, without pushing anything.
+  workflow_dispatch:
 
 jobs:
   pytest:
